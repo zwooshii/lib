@@ -1,0 +1,1000 @@
+--[[
+    ProjectFuzz UI Library  -  for Matcha LuaVM (Drawing API)
+    ---------------------------------------------------------
+    Retained-mode: every drawing is created once, positions are only rewritten
+    when something moves, Visible / Color / Text are only written when they change.
+
+    local Lib = loadstring(readfile("ProjectFuzz.lua"))()
+    local Win = Lib:CreateWindow({ Title = "ProjectFuzz | v1.0", Width = 725, Height = 560, ToggleKey = 161 })
+    local Tab = Win:AddTab("Main")
+    local Sec = Tab:AddSection("Section", "Left")           -- "Left" or "Right"
+    local T   = Sec:AddToggle("id", "Label", false, function(v) end)
+    T:AddKeybind("id_kb", 0, "Toggle")                       -- addons sit on the right of the row
+    T:AddColorPicker("id_col", Color3.fromRGB(255,255,255))
+    Sec:AddSlider("id", "Label", 0, 100, 50, { Suffix = "%", Decimals = 0, ShowMax = true, Callback = fn })
+    Sec:AddDropdown("id", "Label", {"A","B"}, "A", fn, false) -- last arg = multi select
+    Sec:AddButton("Label", fn) / Sec:AddLabel("text") / Sec:AddKeybind(...) / Sec:AddColorPicker(...) / Sec:AddSpacing(n)
+    local Box = Tab:AddTabbox("Right"); local Sub = Box:AddTab("Aim")  -- Sub is used like a section
+    Lib.Flags.id                                              -- current value of any widget
+    Lib.Objects.id:Set(v) / :Get()
+    Lib:Notify("Title", "Text", 5)
+    Lib:SaveConfig("name") / Lib:LoadConfig("name")
+    Lib:Unload()
+]]
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local HttpService = game:GetService("HttpService")
+
+local genv = (type(getgenv) == "function" and getgenv()) or nil
+if genv and genv.ProjectFuzz and type(genv.ProjectFuzz.Unload) == "function" then
+    pcall(genv.ProjectFuzz.Unload, genv.ProjectFuzz) -- re-executing replaces the old copy
+end
+
+local Lib = { Flags = {}, Objects = {}, Windows = {}, Notes = {}, Version = "1.0.0", alive = true, Uppercase = true }
+if genv then genv.ProjectFuzz = Lib end
+
+----------------------------------------------------------------------
+-- Theme (edit before CreateWindow)
+----------------------------------------------------------------------
+local T = {
+    Background = Color3.fromRGB(13, 12, 19),
+    Panel      = Color3.fromRGB(17, 16, 25),
+    Box        = Color3.fromRGB(9, 9, 14),
+    Border     = Color3.fromRGB(42, 38, 62),
+    Outline    = Color3.fromRGB(88, 60, 150),
+    Accent     = Color3.fromRGB(176, 124, 255),
+    Text       = Color3.fromRGB(205, 205, 215),
+    TextDim    = Color3.fromRGB(125, 122, 140),
+    White      = Color3.fromRGB(255, 255, 255),
+    Hover      = Color3.fromRGB(32, 29, 48),
+    TabActive  = Color3.fromRGB(26, 23, 40),
+}
+Lib.Theme = T
+
+local FONT = Drawing.Fonts.System
+for _, n in ipairs({ "Pixel", "Monospace", "System" }) do
+    local f = Drawing.Fonts[n]
+    if f ~= nil then FONT = f break end
+end
+Lib.Font = FONT
+
+local PAD, GAP = 10, 8          -- window padding / gap between columns
+local TITLE_H, TABBAR_Y, TABBAR_H = 22, 27, 22
+local CONTENT_Y = 58
+
+----------------------------------------------------------------------
+-- Helpers
+----------------------------------------------------------------------
+local floor, max, min = math.floor, math.max, math.min
+local function clamp(v, lo, hi) if hi < lo then return lo end if v < lo then return lo end if v > hi then return hi end return v end
+local function U(s) s = tostring(s) if Lib.Uppercase then return string.upper(s) end return s end
+local function V2(x, y) return Vector2.new(x, y) end
+
+local viewSize
+do
+    local last = V2(1920, 1080)
+    viewSize = function()
+        local cam = Workspace.CurrentCamera
+        if cam then local v = cam.ViewportSize if v then last = v end end
+        return last
+    end
+end
+
+local function mk(class, props)
+    local d = Drawing.new(class)
+    for k, v in pairs(props) do d[k] = v end
+    if class == "Text" then d.Outline = false end
+    d.Visible = false
+    return d
+end
+
+local KEYNAMES = { [4] = "MB3", [5] = "MB4", [6] = "MB5", [8] = "BKSP", [9] = "TAB", [13] = "ENTER", [16] = "SHIFT", [17] = "CTRL",
+    [18] = "ALT", [20] = "CAPS", [27] = "ESC", [32] = "SPACE", [33] = "PGUP", [34] = "PGDN", [35] = "END", [36] = "HOME",
+    [37] = "LEFT", [38] = "UP", [39] = "RIGHT", [40] = "DOWN", [45] = "INS", [46] = "DEL", [160] = "LSHIFT", [161] = "RSHIFT",
+    [162] = "LCTRL", [163] = "RCTRL", [164] = "LALT", [165] = "RALT" }
+for i = 48, 57 do KEYNAMES[i] = string.char(i) end
+for i = 65, 90 do KEYNAMES[i] = string.char(i) end
+for i = 1, 12 do KEYNAMES[111 + i] = "F" .. i end
+for i = 0, 9 do KEYNAMES[96 + i] = "NUM" .. i end
+local function keyName(k) if not k or k == 0 then return "NONE" end return KEYNAMES[k] or ("K" .. k) end
+
+local function reg(id, obj, value)
+    if id then
+        Lib.Objects[id] = obj
+        Lib.Flags[id] = value
+    end
+end
+
+----------------------------------------------------------------------
+-- Classes
+----------------------------------------------------------------------
+local Window, Tab, Section = {}, {}, {}
+Window.__index, Tab.__index, Section.__index = Window, Tab, Section
+
+-- a drawing + where it sits. org = table with x / y (box or popup origin, window-relative), nil = window origin
+function Window:_rec(list, class, props, ox, oy, org, tab, sec)
+    local rec = { d = mk(class, props), ox = ox, oy = oy, org = org, tab = tab, sec = sec, v = false }
+    list[#list + 1] = rec
+    self:_put(rec)
+    self.syncDirty = true
+    return rec
+end
+
+function Window:_abs(o)
+    local org = o.org
+    return self.x + (org and org.x or 0) + o.ox, self.y + (org and org.y or 0) + o.oy
+end
+
+function Window:_put(rec)
+    local x, y = self:_abs(rec)
+    rec.d.Position = V2(x, y)
+end
+
+function Window:_vis(o)
+    if not self.visible or o.hidden then return false end
+    if o.tab and self.active ~= o.tab then return false end
+    local s = o.sec
+    if s and not s:isActive() then return false end
+    return true
+end
+
+function Window:_refresh(list)
+    for i = 1, #list do
+        local r = list[i]
+        local v = self:_vis(r)
+        if v ~= r.v then r.v = v r.d.Visible = v end
+    end
+end
+
+function Window:_placeList(list)
+    for i = 1, #list do self:_put(list[i]) end
+end
+
+function Window:_sync()
+    self.syncDirty = false
+    self:_refresh(self.chrome)
+    if self.active then self:_refresh(self.active.recs) end
+    if self.popup then self:_refresh(self.popup.recs) end
+end
+
+function Window:_removeList(list)
+    for i = 1, #list do pcall(function() list[i].d:Remove() end) end
+end
+
+function Window:_hit(h)
+    self.hits[#self.hits + 1] = h
+    return h
+end
+
+----------------------------------------------------------------------
+-- Popups (dropdown list / colour picker): one at a time, drawn above everything
+----------------------------------------------------------------------
+function Window:_openPopup(ax, ay, w, h)
+    self:_closePopup()
+    local p = { org = { x = clamp(ax, 2, self.w - w - 2), y = clamp(ay, 2, self.h - h - 2) }, w = w, h = h, recs = {}, hits = {} }
+    self.popup = p
+    self:_rec(p.recs, "Square", { Filled = true, Color = T.Panel, Size = V2(w, h), ZIndex = 30 }, 0, 0, p.org)
+    self:_rec(p.recs, "Square", { Filled = false, Thickness = 1, Color = T.Accent, Size = V2(w, h), ZIndex = 31 }, 0, 0, p.org)
+    return p
+end
+
+function Window:_prec(p, class, props, ox, oy)
+    return self:_rec(p.recs, class, props, ox, oy, p.org)
+end
+
+function Window:_phit(p, h)
+    h.org = p.org
+    p.hits[#p.hits + 1] = h
+    return h
+end
+
+function Window:_closePopup()
+    local p = self.popup
+    if not p then return end
+    self.popup = nil
+    self.cap = nil
+    if self.hover and self.hoverPop then self.hover = nil end
+    self:_removeList(p.recs)
+    if p.onClose then p.onClose() end
+end
+
+----------------------------------------------------------------------
+-- Window
+----------------------------------------------------------------------
+function Lib:CreateWindow(opts)
+    opts = opts or {}
+    local view = viewSize()
+    local win = setmetatable({
+        title = opts.Title or "ProjectFuzz | v1.0",
+        w = opts.Width or 725, h = opts.Height or 560,
+        visible = true, tabs = {}, active = nil, chrome = {}, hits = {}, keybinds = {},
+        ver = 0, toggleKey = opts.ToggleKey or 161, syncDirty = true,
+    }, Window)
+    win.x = opts.X or floor((view.X - win.w) / 2)
+    win.y = opts.Y or floor((view.Y - win.h) / 2)
+    win.colW = floor((win.w - PAD * 2 - GAP) / 2)
+
+    local C = win.chrome
+    win:_rec(C, "Square", { Filled = true, Color = T.Background, Size = V2(win.w, win.h), ZIndex = 1 }, 0, 0)
+    win:_rec(C, "Square", { Filled = false, Thickness = 1, Color = T.Outline, Size = V2(win.w, win.h), ZIndex = 2 }, 0, 0)
+    win.titleRec = win:_rec(C, "Text", { Text = U(win.title), Color = T.TextDim, Font = FONT, Size = 12, ZIndex = 3 }, 8, 5)
+    local closeRec = win:_rec(C, "Text", { Text = "X", Color = T.TextDim, Font = FONT, Size = 12, ZIndex = 3 }, win.w - 16, 5)
+    win:_rec(C, "Square", { Filled = true, Color = T.Border, Size = V2(win.w - 2, 1), ZIndex = 3 }, 1, TITLE_H)
+
+    -- dragging by the title bar
+    win:_hit({ ox = 0, oy = 0, w = win.w - 24, h = TITLE_H,
+        onDown = function(mx, my) win:_closePopup() win.dx, win.dy = mx - win.x, my - win.y end,
+        onDrag = function(mx, my)
+            local v = viewSize()
+            local nx = clamp(mx - win.dx, 0, v.X - win.w)
+            local ny = clamp(my - win.dy, 0, v.Y - win.h)
+            if nx ~= win.x or ny ~= win.y then
+                win.x, win.y = nx, ny
+                win.ver = win.ver + 1
+                win:_placeList(win.chrome)
+                if win.active then win:_placeList(win.active.recs) win.active.placedVer = win.ver end
+            end
+        end })
+    win:_hit({ ox = win.w - 22, oy = 0, w = 22, h = TITLE_H,
+        onDown = function() win:SetVisible(false) end,
+        onHover = function(b) closeRec.d.Color = b and T.Accent or T.TextDim end })
+
+    Lib.Windows[#Lib.Windows + 1] = win
+    return win
+end
+
+function Window:SetVisible(v)
+    self.visible = v and true or false
+    if not self.visible then self:_closePopup() end
+    for i = 1, #self.tabs do self:_refresh(self.tabs[i].recs) end
+    local a = self.active
+    if self.visible and a and a.placedVer ~= self.ver then a.dirty = true end
+    self:_sync()
+end
+
+function Window:Toggle() self:SetVisible(not self.visible) end
+
+function Window:SetTitle(t)
+    self.titleRec.d.Text = U(t)
+end
+
+function Window:_layoutTabs()
+    local n = #self.tabs
+    local bw = (self.w - PAD * 2 - GAP * (n - 1) / 2 * 0 - 4 * (n - 1)) / n
+    for i = 1, n do
+        local t = self.tabs[i]
+        local x = PAD + (i - 1) * (bw + 4)
+        t.btn.bg.ox, t.btn.bd.ox, t.btn.txt.ox = x, x, x + bw / 2
+        t.btn.bg.d.Size, t.btn.bd.d.Size = V2(bw, TABBAR_H), V2(bw, TABBAR_H)
+        t.btn.hit.ox, t.btn.hit.w = x, bw
+        self:_put(t.btn.bg) self:_put(t.btn.bd) self:_put(t.btn.txt)
+    end
+end
+
+function Window:_styleTabs()
+    for i = 1, #self.tabs do
+        local t = self.tabs[i]
+        local on = (t == self.active)
+        t.btn.bg.d.Color = on and T.TabActive or T.Panel
+        t.btn.txt.d.Color = on and T.Accent or T.TextDim
+    end
+end
+
+function Window:SetTab(tab)
+    if self.active == tab then return end
+    self:_closePopup()
+    local old = self.active
+    self.active = tab
+    self:_styleTabs()
+    if tab.placedVer ~= self.ver then tab.dirty = true end
+    if tab.dirty then tab:_reflow() end
+    if old then self:_refresh(old.recs) end
+    self:_sync()
+end
+
+function Window:AddTab(name)
+    local tab = setmetatable({ win = self, name = name, recs = {}, boxes = { Left = {}, Right = {} }, dirty = true, placedVer = -1 }, Tab)
+    self.tabs[#self.tabs + 1] = tab
+    local C = self.chrome
+    tab.btn = {
+        bg = self:_rec(C, "Square", { Filled = true, Color = T.Panel, Size = V2(10, TABBAR_H), ZIndex = 3 }, 0, TABBAR_Y),
+        bd = self:_rec(C, "Square", { Filled = false, Thickness = 1, Color = T.Border, Size = V2(10, TABBAR_H), ZIndex = 4 }, 0, TABBAR_Y),
+        txt = self:_rec(C, "Text", { Text = U(name), Color = T.TextDim, Font = FONT, Size = 12, Center = true, ZIndex = 5 }, 0, TABBAR_Y + TABBAR_H / 2),
+    }
+    tab.btn.hit = self:_hit({ ox = 0, oy = TABBAR_Y, w = 10, h = TABBAR_H,
+        onDown = function() self:SetTab(tab) end,
+        onHover = function(b) if self.active ~= tab then tab.btn.txt.d.Color = b and T.Text or T.TextDim end end })
+    self:_layoutTabs()
+    if not self.active then
+        self.active = tab
+        tab.dirty = true
+    end
+    self:_styleTabs()
+    return tab
+end
+
+function Window:Destroy()
+    self:_closePopup()
+    self:_removeList(self.chrome)
+    for i = 1, #self.tabs do self:_removeList(self.tabs[i].recs) end
+    for i = #Lib.Windows, 1, -1 do if Lib.Windows[i] == self then table.remove(Lib.Windows, i) end end
+end
+
+----------------------------------------------------------------------
+-- Tab: two columns of boxes (sections / tabboxes)
+----------------------------------------------------------------------
+function Tab:_newBox(side, h)
+    side = (side == "Right") and "Right" or "Left"
+    local box = { tab = self, side = side, x = 0, y = 0, w = self.win.colW, h = h or 30 }
+    local col = self.boxes[side]
+    col[#col + 1] = box
+    self.dirty = true
+    return box
+end
+
+function Tab:_brec(box, class, props, ox, oy)
+    return self.win:_rec(self.recs, class, props, ox, oy, box, self, nil)
+end
+
+function Tab:_reflow()
+    local win = self.win
+    for side, col in pairs(self.boxes) do
+        local y = CONTENT_Y
+        for i = 1, #col do
+            local b = col[i]
+            b.x = (side == "Left") and PAD or (PAD + win.colW + GAP)
+            b.y = y
+            if b.sz ~= b.h then
+                b.sz = b.h
+                b.bg.d.Size = V2(b.w, b.h)
+                b.bd.d.Size = V2(b.w, b.h)
+            end
+            y = y + b.h + GAP
+        end
+    end
+    win:_placeList(self.recs)
+    self.placedVer = win.ver
+    self.dirty = false
+end
+
+local function newSection(tab, box, cy, sub)
+    return setmetatable({ win = tab.win, tab = tab, box = box, cy = cy, sub = sub }, Section)
+end
+
+function Section:isActive()
+    local b = self.box
+    return b.activeSub == nil or b.activeSub == self
+end
+
+function Tab:AddSection(title, side)
+    local box = self:_newBox(side, 36)
+    box.bg = self:_brec(box, "Square", { Filled = true, Color = T.Panel, Size = V2(box.w, 36), ZIndex = 2 }, 0, 0)
+    box.bd = self:_brec(box, "Square", { Filled = false, Thickness = 1, Color = T.Border, Size = V2(box.w, 36), ZIndex = 3 }, 0, 0)
+    self:_brec(box, "Square", { Filled = true, Color = T.Accent, Size = V2(box.w, 2), ZIndex = 4 }, 0, 0)
+    self:_brec(box, "Text", { Text = U(title or ""), Color = T.Text, Font = FONT, Size = 12, ZIndex = 5 }, 8, 8)
+    return newSection(self, box, 28, false)
+end
+
+function Tab:AddTabbox(side)
+    local win = self.win
+    local box = self:_newBox(side, 38)
+    box.subs = {}
+    box.bg = self:_brec(box, "Square", { Filled = true, Color = T.Panel, Size = V2(box.w, 38), ZIndex = 2 }, 0, 0)
+    box.bd = self:_brec(box, "Square", { Filled = false, Thickness = 1, Color = T.Border, Size = V2(box.w, 38), ZIndex = 3 }, 0, 0)
+    self:_brec(box, "Square", { Filled = true, Color = T.Accent, Size = V2(box.w, 2), ZIndex = 4 }, 0, 0)
+    self:_brec(box, "Square", { Filled = true, Color = T.Border, Size = V2(box.w, 1), ZIndex = 4 }, 0, 24)
+    local tb = { box = box }
+
+    local function style()
+        for i = 1, #box.subs do
+            local s = box.subs[i]
+            local on = (box.activeSub == s)
+            s.hdrTxt.d.Color = on and T.Accent or T.TextDim
+            s.hdrLine.hidden = not on
+        end
+        win:_sync()
+    end
+
+    function tb:AddTab(name)
+        local sec = newSection(self.box.tab, box, 32, true)
+        box.subs[#box.subs + 1] = sec
+        sec.hdrTxt = self.box.tab:_brec(box, "Text", { Text = U(name), Color = T.TextDim, Font = FONT, Size = 12, Center = true, ZIndex = 5 }, 0, 13)
+        sec.hdrLine = self.box.tab:_brec(box, "Square", { Filled = true, Color = T.Accent, Size = V2(10, 2), ZIndex = 5 }, 0, 23)
+        sec.hdrLine.hidden = true
+        sec.hdrHit = win:_hit({ ox = 0, oy = 2, w = 10, h = 22, org = box, tab = box.tab,
+            onDown = function() box.activeSub = sec style() end,
+            onHover = function(b) if box.activeSub ~= sec then sec.hdrTxt.d.Color = b and T.Text or T.TextDim end end })
+        if not box.activeSub then box.activeSub = sec end
+        local n = #box.subs
+        local sw = box.w / n
+        for i = 1, n do
+            local s = box.subs[i]
+            s.hdrTxt.ox = (i - 0.5) * sw
+            s.hdrLine.ox = (i - 1) * sw + 6
+            s.hdrLine.d.Size = V2(sw - 12, 2)
+            s.hdrHit.ox, s.hdrHit.w = (i - 1) * sw, sw
+        end
+        box.tab.dirty = true
+        style()
+        return sec
+    end
+    return tb
+end
+
+----------------------------------------------------------------------
+-- Section helpers
+----------------------------------------------------------------------
+function Section:_grow(h)
+    local y = self.cy
+    self.cy = y + h
+    local box = self.box
+    if box.subs then
+        local m = 0
+        for i = 1, #box.subs do if box.subs[i].cy > m then m = box.subs[i].cy end end
+        box.h = m + 8
+    else
+        box.h = self.cy + 8
+    end
+    self.tab.dirty = true
+    return y
+end
+
+function Section:_r(class, props, ox, oy)
+    return self.win:_rec(self.tab.recs, class, props, ox, oy, self.box, self.tab, self)
+end
+
+function Section:_h(h)
+    h.org, h.tab, h.sec = self.box, self.tab, self
+    return self.win:_hit(h)
+end
+
+function Section:AddSpacing(n) self:_grow(n or 8) end
+
+function Section:AddLabel(text)
+    local y = self:_grow(16)
+    local r = self:_r("Text", { Text = U(text), Color = T.TextDim, Font = FONT, Size = 12, ZIndex = 5 }, 8, y + 2)
+    local obj = {}
+    function obj:Set(t) r.d.Text = U(t) end
+    return obj
+end
+
+----------------------------------------------------------------------
+-- Keybind (also usable as a toggle addon)
+----------------------------------------------------------------------
+function Section:_keybindAt(id, y, rx, default, mode, cb)
+    local win = self.win
+    local kb = { id = id, type = "Keybind", key = default or 0, mode = mode or "Toggle", cb = cb }
+    kb.state = (kb.mode == "Always")
+    local x = rx - 44
+    self:_r("Square", { Filled = true, Color = T.Box, Size = V2(44, 14), ZIndex = 5 }, x, y + 2)
+    local bd = self:_r("Square", { Filled = false, Thickness = 1, Color = T.Border, Size = V2(44, 14), ZIndex = 6 }, x, y + 2)
+    kb.txt = self:_r("Text", { Text = keyName(kb.key), Color = T.TextDim, Font = FONT, Size = 10, Center = true, ZIndex = 7 }, x + 22, y + 9)
+
+    function kb:Set(key)
+        self.key = key or 0
+        self.txt.d.Text = keyName(self.key)
+        self.txt.d.Color = T.TextDim
+        Lib.Flags[id or ""] = self.state
+    end
+    function kb:Get() return self.state end
+    function kb:IsActive() return self.state end
+    function kb:Export() return { self.key, self.mode } end
+    function kb:Import(v) if type(v) == "table" then self.mode = v[2] or self.mode self:Set(v[1]) end end
+
+    self:_h({ ox = x, oy = y + 2, w = 44, h = 14,
+        onDown = function()
+            win.listening = kb
+            win.listenAt = tick()
+            kb.txt.d.Text = "..."
+            kb.txt.d.Color = T.Accent
+        end,
+        onHover = function(b) bd.d.Color = b and T.Accent or T.Border end })
+
+    win.keybinds[#win.keybinds + 1] = kb
+    reg(id, kb, kb.state)
+    return kb, x - 6
+end
+
+function Section:AddKeybind(id, label, default, mode, cb)
+    local y = self:_grow(18)
+    self:_r("Text", { Text = U(label), Color = T.Text, Font = FONT, Size = 12, ZIndex = 5 }, 8, y + 3)
+    local kb = self:_keybindAt(id, y, self.box.w - 8, default, mode, cb)
+    return kb
+end
+
+----------------------------------------------------------------------
+-- Colour picker (also usable as a toggle addon)
+----------------------------------------------------------------------
+function Section:_colorAt(id, y, rx, default, cb)
+    local win = self.win
+    local cp = { id = id, type = "Color", value = default or T.White, cb = cb }
+    local x = rx - 26
+    local sw = self:_r("Square", { Filled = true, Color = cp.value, Size = V2(26, 12), ZIndex = 5 }, x, y + 3)
+    local bd = self:_r("Square", { Filled = false, Thickness = 1, Color = T.Border, Size = V2(26, 12), ZIndex = 6 }, x, y + 3)
+
+    function cp:Set(c, silent)
+        self.value = c
+        sw.d.Color = c
+        Lib.Flags[id or ""] = c
+        if self.cb and not silent then pcall(self.cb, c) end
+    end
+    function cp:Get() return self.value end
+    function cp:Export() return { self.value.R, self.value.G, self.value.B } end
+    function cp:Import(v) if type(v) == "table" and v[1] then self:Set(Color3.new(v[1], v[2], v[3])) end end
+
+    self:_h({ ox = x, oy = y + 3, w = 26, h = 12,
+        onDown = function(_, _, h)
+            local ax, ay = h.ax - win.x, h.ay - win.y
+            local pw, ph = 160, 94
+            local py = ay + 16
+            if py + ph > win.h - 2 then py = ay - ph - 4 end
+            local p = win:_openPopup(ax - pw + 26, py, pw, ph)
+            local prev = win:_prec(p, "Square", { Filled = true, Color = cp.value, Size = V2(pw - 12, 14), ZIndex = 32 }, 6, 6)
+            local chans = { "R", "G", "B" }
+            local vals = { floor(cp.value.R * 255 + 0.5), floor(cp.value.G * 255 + 0.5), floor(cp.value.B * 255 + 0.5) }
+            local fills, txts = {}, {}
+            local BW = 100
+            local function apply()
+                local c = Color3.fromRGB(vals[1], vals[2], vals[3])
+                prev.d.Color = c
+                cp:Set(c)
+                for i = 1, 3 do
+                    fills[i].d.Size = V2(max(vals[i] / 255 * BW, 1), 10)
+                    txts[i].d.Text = tostring(vals[i])
+                end
+            end
+            for i = 1, 3 do
+                local ry = 28 + (i - 1) * 20
+                win:_prec(p, "Text", { Text = chans[i], Color = T.TextDim, Font = FONT, Size = 12, ZIndex = 32 }, 6, ry - 1)
+                win:_prec(p, "Square", { Filled = true, Color = T.Box, Size = V2(BW, 10), ZIndex = 32 }, 22, ry)
+                fills[i] = win:_prec(p, "Square", { Filled = true, Color = T.Accent, Size = V2(max(vals[i] / 255 * BW, 1), 10), ZIndex = 33 }, 22, ry)
+                win:_prec(p, "Square", { Filled = false, Thickness = 1, Color = T.Border, Size = V2(BW, 10), ZIndex = 34 }, 22, ry)
+                txts[i] = win:_prec(p, "Text", { Text = tostring(vals[i]), Color = T.Text, Font = FONT, Size = 12, ZIndex = 33 }, 128, ry - 1)
+                local function setFrom(mx, _, hh)
+                    vals[i] = floor(clamp((mx - hh.ax) / BW, 0, 1) * 255 + 0.5)
+                    apply()
+                end
+                win:_phit(p, { ox = 22, oy = ry - 2, w = BW, h = 14, onDown = setFrom, onDrag = setFrom })
+            end
+        end,
+        onHover = function(b) bd.d.Color = b and T.Accent or T.Border end })
+
+    reg(id, cp, cp.value)
+    return cp, x - 6
+end
+
+function Section:AddColorPicker(id, label, default, cb)
+    local y = self:_grow(18)
+    self:_r("Text", { Text = U(label), Color = T.Text, Font = FONT, Size = 12, ZIndex = 5 }, 8, y + 3)
+    local cp = self:_colorAt(id, y, self.box.w - 8, default, cb)
+    return cp
+end
+
+----------------------------------------------------------------------
+-- Toggle
+----------------------------------------------------------------------
+function Section:AddToggle(id, label, default, cb)
+    local win = self.win
+    local y = self:_grow(18)
+    local obj = { id = id, type = "Toggle", value = (default == true), cb = cb, rx = self.box.w - 8 }
+    local frame = self:_r("Square", { Filled = true, Color = T.Box, Size = V2(12, 12), ZIndex = 5 }, 8, y + 3)
+    local bd = self:_r("Square", { Filled = false, Thickness = 1, Color = T.Border, Size = V2(12, 12), ZIndex = 6 }, 8, y + 3)
+    local fill = self:_r("Square", { Filled = true, Color = T.Accent, Size = V2(8, 8), ZIndex = 7 }, 10, y + 5)
+    local lbl = self:_r("Text", { Text = U(label), Color = T.Text, Font = FONT, Size = 12, ZIndex = 6 }, 26, y + 3)
+    fill.hidden = not obj.value
+
+    function obj:Set(v, silent)
+        v = (v == true)
+        if v == self.value and fill.hidden == (not v) then return end
+        self.value = v
+        fill.hidden = not v
+        Lib.Flags[id or ""] = v
+        win:_sync()
+        if self.cb and not silent then pcall(self.cb, v) end
+    end
+    function obj:Get() return self.value end
+    function obj:Export() return self.value end
+    function obj:Import(v) if type(v) == "boolean" then self:Set(v) end end
+    function obj:AddKeybind(kid, default, mode, kcb)
+        local kb, nrx = self.sec:_keybindAt(kid, self.y, self.rx, default, mode, kcb)
+        self.rx = nrx
+        return kb
+    end
+    function obj:AddColorPicker(cid, color, ccb)
+        local cp, nrx = self.sec:_colorAt(cid, self.y, self.rx, color, ccb)
+        self.rx = nrx
+        return cp
+    end
+    obj.sec, obj.y = self, y
+
+    self:_h({ ox = 0, oy = y, w = self.box.w, h = 18,
+        onDown = function() obj:Set(not obj.value) end,
+        onHover = function(b) lbl.d.Color = b and T.White or T.Text bd.d.Color = b and T.Accent or T.Border end })
+
+    reg(id, obj, obj.value)
+    return obj
+end
+
+----------------------------------------------------------------------
+-- Slider
+----------------------------------------------------------------------
+function Section:AddSlider(id, label, lo, hi, default, opts)
+    opts = opts or {}
+    local win = self.win
+    local bw = self.box.w - 16
+    local y = self:_grow(36)
+    local dec = opts.Decimals or 0
+    local suffix = opts.Suffix or ""
+    local obj = { id = id, type = "Slider", min = lo, max = hi, cb = opts.Callback }
+    obj.value = clamp(default or lo, lo, hi)
+
+    self:_r("Text", { Text = U(label), Color = T.Text, Font = FONT, Size = 12, ZIndex = 5 }, 8, y + 1)
+    self:_r("Square", { Filled = true, Color = T.Box, Size = V2(bw, 14), ZIndex = 5 }, 8, y + 18)
+    local fill = self:_r("Square", { Filled = true, Color = T.Accent, Size = V2(bw, 14), ZIndex = 6 }, 8, y + 18)
+    local bd = self:_r("Square", { Filled = false, Thickness = 1, Color = T.Border, Size = V2(bw, 14), ZIndex = 7 }, 8, y + 18)
+    local txt = self:_r("Text", { Text = "", Color = T.White, Font = FONT, Size = 12, Center = true, ZIndex = 8 }, 8 + bw / 2, y + 25)
+
+    local fmt = "%." .. dec .. "f"
+    local function show()
+        local s = string.format(fmt, obj.value) .. suffix
+        if opts.ShowMax then s = s .. "/" .. string.format(fmt, hi) .. suffix end
+        txt.d.Text = U(s)
+        local w = (obj.value - lo) / max(hi - lo, 1e-9) * bw
+        fill.hidden = w < 1
+        if not fill.hidden then fill.d.Size = V2(w, 14) end
+        win:_sync()
+    end
+    show()
+
+    function obj:Set(v, silent)
+        local m = 10 ^ dec
+        v = floor(clamp(v, lo, hi) * m + 0.5) / m
+        if v == self.value and txt.d.Text ~= "" then return end
+        self.value = v
+        Lib.Flags[id or ""] = v
+        show()
+        if self.cb and not silent then pcall(self.cb, v) end
+    end
+    function obj:Get() return self.value end
+    function obj:Export() return self.value end
+    function obj:Import(v) if type(v) == "number" then self:Set(v) end end
+
+    local function fromMouse(mx, _, h)
+        obj:Set(lo + (hi - lo) * clamp((mx - h.ax) / bw, 0, 1))
+    end
+    self:_h({ ox = 8, oy = y + 16, w = bw, h = 18, onDown = fromMouse, onDrag = fromMouse,
+        onHover = function(b) bd.d.Color = b and T.Accent or T.Border end })
+
+    reg(id, obj, obj.value)
+    return obj
+end
+
+----------------------------------------------------------------------
+-- Dropdown (single or multi select)
+----------------------------------------------------------------------
+function Section:AddDropdown(id, label, options, default, cb, multi)
+    local win = self.win
+    local bw = self.box.w - 16
+    local y = self:_grow(38)
+    local obj = { id = id, type = "Dropdown", options = options, multi = (multi == true), cb = cb }
+    if obj.multi then
+        obj.value = {}
+        if type(default) == "table" then for _, v in ipairs(default) do obj.value[v] = true end end
+    else
+        obj.value = default or options[1]
+    end
+
+    self:_r("Text", { Text = U(label), Color = T.Text, Font = FONT, Size = 12, ZIndex = 5 }, 8, y + 1)
+    self:_r("Square", { Filled = true, Color = T.Box, Size = V2(bw, 16), ZIndex = 5 }, 8, y + 18)
+    local bd = self:_r("Square", { Filled = false, Thickness = 1, Color = T.Border, Size = V2(bw, 16), ZIndex = 6 }, 8, y + 18)
+    local txt = self:_r("Text", { Text = "", Color = T.Text, Font = FONT, Size = 12, ZIndex = 7 }, 14, y + 20)
+    self:_r("Text", { Text = "v", Color = T.TextDim, Font = FONT, Size = 12, ZIndex = 7 }, 8 + bw - 14, y + 20)
+
+    local maxc = max(floor((bw - 34) / 7), 4)
+    local function display()
+        local s
+        if obj.multi then
+            local t = {}
+            for _, o in ipairs(options) do if obj.value[o] then t[#t + 1] = o end end
+            s = (#t == 0) and "None" or table.concat(t, ", ")
+        else
+            s = tostring(obj.value)
+        end
+        if #s > maxc then s = string.sub(s, 1, maxc - 2) .. ".." end
+        txt.d.Text = U(s)
+        win:_sync()
+    end
+    display()
+
+    function obj:Set(v, silent)
+        if self.multi then
+            local t = {}
+            if type(v) == "table" then
+                for k, x in pairs(v) do
+                    if type(k) == "number" then t[x] = true elseif x == true then t[k] = true end
+                end
+            end
+            self.value = t
+        else
+            self.value = v
+        end
+        Lib.Flags[id or ""] = self.value
+        display()
+        if self.cb and not silent then pcall(self.cb, self.value) end
+    end
+    function obj:Get() return self.value end
+    function obj:Export()
+        if not self.multi then return self.value end
+        local t = {}
+        for _, o in ipairs(options) do if self.value[o] then t[#t + 1] = o end end
+        return t
+    end
+    function obj:Import(v) self:Set(v) end
+
+    self:_h({ ox = 8, oy = y + 18, w = bw, h = 16,
+        onHover = function(b) bd.d.Color = b and T.Accent or T.Border end,
+        onDown = function(_, _, h)
+            local n = #options
+            local ph = n * 16 + 4
+            local ax, ay = h.ax - win.x, h.ay - win.y + 17
+            if ay + ph > win.h - 2 then ay = h.ay - win.y - ph - 1 end
+            local p = win:_openPopup(ax, ay, bw, ph)
+            local rows = {}
+            local function recolor()
+                for i = 1, n do
+                    local o = options[i]
+                    local on = obj.multi and obj.value[o] or (not obj.multi and obj.value == o)
+                    rows[i].txt.d.Color = on and T.Accent or T.Text
+                end
+            end
+            for i = 1, n do
+                local ry = 2 + (i - 1) * 16
+                local row = {}
+                row.bg = win:_prec(p, "Square", { Filled = true, Color = T.Panel, Size = V2(bw - 4, 16), ZIndex = 32 }, 2, ry)
+                row.txt = win:_prec(p, "Text", { Text = U(options[i]), Color = T.Text, Font = FONT, Size = 12, ZIndex = 33 }, 8, ry + 2)
+                rows[i] = row
+                win:_phit(p, { ox = 2, oy = ry, w = bw - 4, h = 16,
+                    onHover = function(b) row.bg.d.Color = b and T.Hover or T.Panel end,
+                    onDown = function()
+                        local o = options[i]
+                        if obj.multi then
+                            local t = {}
+                            for k, x in pairs(obj.value) do t[k] = x end
+                            t[o] = (not t[o]) or nil
+                            obj:Set(t)
+                            recolor()
+                        else
+                            obj:Set(o)
+                            win:_closePopup()
+                        end
+                    end })
+            end
+            recolor()
+        end })
+
+    reg(id, obj, obj.value)
+    return obj
+end
+
+----------------------------------------------------------------------
+-- Button
+----------------------------------------------------------------------
+function Section:AddButton(label, cb)
+    local bw = self.box.w - 16
+    local y = self:_grow(26)
+    local bg = self:_r("Square", { Filled = true, Color = T.Box, Size = V2(bw, 20), ZIndex = 5 }, 8, y + 2)
+    local bd = self:_r("Square", { Filled = false, Thickness = 1, Color = T.Border, Size = V2(bw, 20), ZIndex = 6 }, 8, y + 2)
+    local txt = self:_r("Text", { Text = U(label), Color = T.Text, Font = FONT, Size = 12, Center = true, ZIndex = 7 }, 8 + bw / 2, y + 12)
+    self:_h({ ox = 8, oy = y + 2, w = bw, h = 20,
+        onDown = function()
+            bg.d.Color = T.Accent
+            txt.d.Color = T.Background
+            if cb then pcall(cb) end
+        end,
+        onUp = function() bg.d.Color = T.Box txt.d.Color = T.Text end,
+        onHover = function(b) bd.d.Color = b and T.Accent or T.Border end })
+    return { SetText = function(_, t) txt.d.Text = U(t) end }
+end
+
+----------------------------------------------------------------------
+-- Notifications (bottom-right, stacked upward)
+----------------------------------------------------------------------
+local function layoutNotes()
+    local v = viewSize()
+    for i = 1, #Lib.Notes do
+        local n = Lib.Notes[i]
+        local x, y = v.X - 250 - 20, v.Y - 52 * i - 10
+        n.bg.Position = V2(x, y)
+        n.bd.Position = V2(x, y)
+        n.bar.Position = V2(x, y)
+        n.title.Position = V2(x + 12, y + 7)
+        n.text.Position = V2(x + 12, y + 25)
+    end
+end
+
+function Lib:Notify(title, text, secs)
+    local n = { t0 = tick(), secs = secs or 5 }
+    n.bg = mk("Square", { Filled = true, Color = T.Background, Size = V2(250, 44), ZIndex = 50 })
+    n.bd = mk("Square", { Filled = false, Thickness = 1, Color = T.Outline, Size = V2(250, 44), ZIndex = 51 })
+    n.bar = mk("Square", { Filled = true, Color = T.Accent, Size = V2(3, 44), ZIndex = 52 })
+    n.title = mk("Text", { Text = U(title or "ProjectFuzz"), Color = T.White, Font = FONT, Size = 12, ZIndex = 52 })
+    n.text = mk("Text", { Text = tostring(text or ""), Color = T.TextDim, Font = FONT, Size = 12, ZIndex = 52 })
+    table.insert(Lib.Notes, 1, n)
+    layoutNotes()
+    for _, d in ipairs({ n.bg, n.bd, n.bar, n.title, n.text }) do d.Visible = true end
+end
+
+----------------------------------------------------------------------
+-- Config
+----------------------------------------------------------------------
+function Lib:SaveConfig(name)
+    if not writefile then return false, "writefile unavailable" end
+    local data = {}
+    for id, obj in pairs(Lib.Objects) do
+        if obj.Export then data[id] = obj:Export() end
+    end
+    local ok, err = pcall(function() writefile("ProjectFuzz_" .. (name or "default") .. ".json", HttpService:JSONEncode(data)) end)
+    return ok, err
+end
+
+function Lib:LoadConfig(name)
+    local file = "ProjectFuzz_" .. (name or "default") .. ".json"
+    if not (isfile and readfile and isfile(file)) then return false, "no config" end
+    local ok, data = pcall(function() return HttpService:JSONDecode(readfile(file)) end)
+    if not ok or type(data) ~= "table" then return false, "unreadable config" end
+    for id, v in pairs(data) do
+        local obj = Lib.Objects[id]
+        if obj and obj.Import then pcall(obj.Import, obj, v) end
+    end
+    return true
+end
+
+----------------------------------------------------------------------
+-- Per-frame step (one RenderStepped for every window)
+----------------------------------------------------------------------
+local mouse = Players.LocalPlayer:GetMouse()
+
+local function hitTest(win, list, mx, my)
+    for i = #list, 1, -1 do
+        local h = list[i]
+        if win:_vis(h) then
+            local ax, ay = win:_abs(h)
+            if mx >= ax and mx <= ax + h.w and my >= ay and my <= ay + h.h then
+                h.ax, h.ay = ax, ay
+                return h
+            end
+        end
+    end
+    return nil
+end
+
+function Window:_step(mx, my, down)
+    -- menu key
+    if not self.listening and iskeypressed then
+        local k = iskeypressed(self.toggleKey) == true
+        if k and not self.tkDown then self:SetVisible(not self.visible) end
+        self.tkDown = k
+    end
+
+    local a = self.active
+    if a and a.dirty and self.visible then a:_reflow() end
+    if self.syncDirty then self:_sync() end
+
+    -- keybinds (run even while the menu is hidden)
+    if iskeypressed then
+        if self.listening then
+            local kb = self.listening
+            if tick() - self.listenAt > 0.15 then
+                for vk = 3, 254 do
+                    if vk ~= 1 and vk ~= 2 and iskeypressed(vk) == true then
+                        kb:Set(vk == 27 and 0 or vk)
+                        self.listening = nil
+                        break
+                    end
+                end
+            end
+        else
+            for i = 1, #self.keybinds do
+                local kb = self.keybinds[i]
+                if kb.key ~= 0 then
+                    local d = iskeypressed(kb.key) == true
+                    if kb.mode == "Hold" then
+                        if d ~= kb.state then kb.state = d Lib.Flags[kb.id or ""] = d if kb.cb then pcall(kb.cb, d) end end
+                    elseif kb.mode == "Always" then
+                        kb.state = true
+                    elseif d and not kb.down then
+                        kb.state = not kb.state
+                        Lib.Flags[kb.id or ""] = kb.state
+                        if kb.cb then pcall(kb.cb, kb.state) end
+                    end
+                    kb.down = d
+                end
+            end
+        end
+    end
+
+    if not self.visible then self.wasDown = down return end
+
+    local was = self.wasDown
+    self.wasDown = down
+    local pop = self.popup
+
+    if down and not was then
+        if isrbxactive and not isrbxactive() then return end
+        if pop then
+            local h = hitTest(self, pop.hits, mx, my)
+            if h then
+                self.cap = h
+                if h.onDown then h.onDown(mx, my, h) end
+            else
+                local px, py = self.x + pop.org.x, self.y + pop.org.y
+                if not (mx >= px and mx <= px + pop.w and my >= py and my <= py + pop.h) then self:_closePopup() end
+            end
+            return
+        end
+        local h = hitTest(self, self.hits, mx, my)
+        if h then
+            self.cap = h
+            if h.onDown then h.onDown(mx, my, h) end
+        end
+    elseif down then
+        local c = self.cap
+        if c and c.onDrag then
+            c.ax, c.ay = self:_abs(c)
+            c.onDrag(mx, my, c)
+        end
+    else
+        local c = self.cap
+        if c and c.onUp then c.onUp(mx, my, c) end
+        self.cap = nil
+        -- hover
+        local cand
+        if self.popup then cand = hitTest(self, self.popup.hits, mx, my) else cand = hitTest(self, self.hits, mx, my) end
+        if cand ~= self.hover then
+            local old = self.hover
+            self.hover = cand
+            if old and old.onHover then old.onHover(false) end
+            if cand and cand.onHover then cand.onHover(true) end
+        end
+    end
+end
+
+local lastErr
+local conn = RunService.RenderStepped:Connect(function()
+    if not Lib.alive then return end
+    local ok, err = pcall(function()
+        local down = ismouse1pressed and ismouse1pressed() or false
+        local mx, my = mouse.X, mouse.Y
+        for i = 1, #Lib.Windows do Lib.Windows[i]:_step(mx, my, down) end
+
+        local notes = Lib.Notes
+        local changed = false
+        for i = #notes, 1, -1 do
+            local n = notes[i]
+            if tick() - n.t0 >= n.secs then
+                for _, d in ipairs({ n.bg, n.bd, n.bar, n.title, n.text }) do pcall(function() d:Remove() end) end
+                table.remove(notes, i)
+                changed = true
+            end
+        end
+        if changed then layoutNotes() end
+    end)
+    if not ok and err ~= lastErr then
+        lastErr = err
+        warn("[ProjectFuzz] " .. tostring(err))
+    end
+end)
+
+function Lib:Unload()
+    Lib.alive = false
+    pcall(function() conn:Disconnect() end)
+    for i = #Lib.Windows, 1, -1 do pcall(Lib.Windows[i].Destroy, Lib.Windows[i]) end
+    for _, n in ipairs(Lib.Notes) do
+        for _, d in ipairs({ n.bg, n.bd, n.bar, n.title, n.text }) do pcall(function() d:Remove() end) end
+    end
+    Lib.Notes = {}
+end
+
+return Lib
