@@ -28,12 +28,15 @@ local Workspace = game:GetService("Workspace")
 local HttpService = game:GetService("HttpService")
 
 local genv = (type(getgenv) == "function" and getgenv()) or nil
-if genv and genv.ProjectFuzz and type(genv.ProjectFuzz.Unload) == "function" then
-    pcall(genv.ProjectFuzz.Unload, genv.ProjectFuzz) -- re-executing replaces the old copy
+if genv and genv.ProjectFuzzUI and type(genv.ProjectFuzzUI.Unload) == "function" then
+    pcall(genv.ProjectFuzzUI.Unload, genv.ProjectFuzzUI) -- re-executing replaces the old copy
 end
 
-local Lib = { Flags = {}, Objects = {}, Windows = {}, Notes = {}, Version = "1.0.0", alive = true, Uppercase = true }
-if genv then genv.ProjectFuzz = Lib end
+local Lib = { Flags = {}, Objects = {}, Windows = {}, Notes = {}, Version = "1.0.1", alive = true, Uppercase = true }
+-- Also published globally (ProjectFuzzUI is the ONLY global this file creates), so a loader that
+-- loses the return value can still pick it up with getgenv().ProjectFuzzUI
+if genv then genv.ProjectFuzzUI = Lib end
+pcall(function() _G.ProjectFuzzUI = Lib end)
 
 ----------------------------------------------------------------------
 -- Theme (edit before CreateWindow)
@@ -53,11 +56,12 @@ local T = {
 }
 Lib.Theme = T
 
-local FONT = Drawing.Fonts.System
+local FONT
 for _, n in ipairs({ "Pixel", "Monospace", "System" }) do
-    local f = Drawing.Fonts[n]
-    if f ~= nil then FONT = f break end
+    local ok, f = pcall(function() return Drawing.Fonts[n] end) -- an unknown font name must not break loading
+    if ok and f ~= nil then FONT = f break end
 end
+if FONT == nil then FONT = 0 end
 Lib.Font = FONT
 
 local PAD, GAP = 10, 8          -- window padding / gap between columns
@@ -854,7 +858,16 @@ end
 ----------------------------------------------------------------------
 -- Per-frame step (one RenderStepped for every window)
 ----------------------------------------------------------------------
-local mouse = Players.LocalPlayer:GetMouse()
+local mouse
+do
+    local okM, m = pcall(function() return Players.LocalPlayer:GetMouse() end)
+    if okM and m then
+        mouse = m
+    else
+        mouse = { X = 0, Y = 0 }
+        warn("[ProjectFuzz] could not get the mouse, clicking will not work")
+    end
+end
 
 local function hitTest(win, list, mx, my)
     for i = #list, 1, -1 do
@@ -995,6 +1008,7 @@ function Lib:Unload()
         for _, d in ipairs({ n.bg, n.bd, n.bar, n.title, n.text }) do pcall(function() d:Remove() end) end
     end
     Lib.Notes = {}
+    if genv and genv.ProjectFuzzUI == Lib then genv.ProjectFuzzUI = nil end
 end
 
 return Lib
