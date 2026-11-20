@@ -1,1350 +1,1567 @@
--- ProjectFuzz: library + demo in ONE file (paste into Matcha and run)
-local Lib = (function()
 --[[
-    ProjectFuzz UI Library  -  for Matcha LuaVM (Drawing API)
-    ---------------------------------------------------------
-    Retained-mode: every drawing is created once, positions are only rewritten
-    when something moves, Visible / Color / Text are only written when they change.
+    placeholder UI  |  Matcha LuaVM  |  Drawing-only, single file, no loadstring layer
+    Naming: nothing here reuses Matcha's own menu API names (UI, AddTab, Section, Toggle,
+    Keybind, SliderInt, SliderFloat, Combo, Button, ColorPicker, InputText, Text, Tip, Spacing).
+    Ours: Lime.Create, hub:Page, page:Box, box:Switch / Slider / Choice / Multi / Popover /
+          KeyPill / Entry / Buttons / ThemeList / Caption, hub:Toast, hub:Get / hub:Set
 
-    local Lib = loadstring(readfile("ProjectFuzz.lua"))()
-    local Win = Lib:CreateWindow({ Title = "ProjectFuzz | v1.0", Width = 725, Height = 560, ToggleKey = 161 })
-    local Tab = Win:AddTab("Main")
-    local Sec = Tab:AddSection("Section", "Left")           -- "Left" or "Right"
-    local T   = Sec:AddToggle("id", "Label", false, function(v) end)
-    T:AddKeybind("id_kb", 0, "Toggle")                       -- addons sit on the right of the row
-    T:AddColorPicker("id_col", Color3.fromRGB(255,255,255))
-    Sec:AddSlider("id", "Label", 0, 100, 50, { Suffix = "%", Decimals = 0, ShowMax = true, Callback = fn })
-    Sec:AddDropdown("id", "Label", {"A","B"}, "A", fn, false) -- last arg = multi select
-    Sec:AddButton("Label", fn) / Sec:AddLabel("text") / Sec:AddKeybind(...) / Sec:AddColorPicker(...) / Sec:AddSpacing(n)
-    local Box = Tab:AddTabbox("Right"); local Sub = Box:AddTab("Aim")  -- Sub is used like a section
-    Lib.Flags.id                                              -- current value of any widget
-    Lib.Objects.id:Set(v) / :Get()
-    Lib:Notify("Title", "Text", 5)
-    Lib:SaveConfig("name") / Lib:LoadConfig("name")
-    Sec:BeginFold(false) ... Sec:EndFold() / Sec:SetFold(f, bool)  -- rows that show/hide (indented while inside)
-    Lib:SetGradient(bool)                                     -- flat colour (default) or gradient
-    Lib:Unload()
+    Design: immediate-mode drawing on top of a pooled set of Drawing objects.
+    Every drawing is created once, cached, and only touched when a property changes.
+    Everything not drawn in a frame is hidden by a sweep at the end of the frame.
 ]]
+
+if _G.__PlaceholderHub then pcall(function() _G.__PlaceholderHub:Destroy() end) end
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local Workspace = game:GetService("Workspace")
-local HttpService = game:GetService("HttpService")
+local LocalPlayer = Players.LocalPlayer
+local Mouse = LocalPlayer:GetMouse()
+local Camera = workspace.CurrentCamera
 
-local genv = (type(getgenv) == "function" and getgenv()) or nil
-if genv and genv.ProjectFuzzUI and type(genv.ProjectFuzzUI.Unload) == "function" then
-    pcall(genv.ProjectFuzzUI.Unload, genv.ProjectFuzzUI) -- re-executing replaces the old copy
+local floor, max, min, exp, abs, sin = math.floor, math.max, math.min, math.exp, math.abs, math.sin
+
+--========================================================================
+-- Constants / state
+--========================================================================
+local W, H, SW, HDR = 760, 560, 150, 56      -- window, sidebar width, header height (design units)
+local OX, OY, SCL = 0, 0, 1                  -- current draw space (screen offset + scale)
+local GA = 1                                 -- global alpha multiplier
+local CLIP0, CLIP1 = nil, nil                -- vertical clip (design units) or nil
+local DT = 1 / 60
+local frameId = 0
+local POP = nil                              -- currently open popup
+local CAP = nil                              -- key capture {owner=, set=}
+local TI = { owner = nil, bs = 0 }           -- text input
+local dragOwner = nil
+local ctxOK = true                           -- whether widgets currently receive input
+local M = { x = 0, y = 0, rawx = 0, rawy = 0, down = false, pressed = false }
+
+--========================================================================
+-- Math helpers
+--========================================================================
+local function clamp(v, a, b) if v < a then return a elseif v > b then return b end return v end
+local function lerp(a, b, t) return a + (b - a) * t end
+local function rgb(r, g, b) return { r / 255, g / 255, b / 255 } end
+local function mix(a, b, t) return { a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t } end
+
+local NARROW = {}
+for ch in (" ijltfrI.,:;|!'[]()"):gmatch(".") do NARROW[ch] = true end
+local function tw(s, size)
+    local w = 0
+    for i = 1, #s do
+        local ch, b = s:sub(i, i), s:byte(i)
+        if NARROW[ch] then w = w + 0.33
+        elseif ch == "m" or ch == "w" or ch == "M" or ch == "W" then w = w + 0.86
+        elseif b >= 65 and b <= 90 then w = w + 0.64
+        elseif b >= 128 then w = w + 0.3
+        else w = w + 0.56 end
+    end
+    return w * size
+end
+local function fit(s, maxw, size)
+    if tw(s, size) <= maxw then return s end
+    while #s > 1 and tw(s .. "...", size) > maxw do s = s:sub(1, #s - 1) end
+    return s .. "..."
+end
+local function wrap(text, maxw, size)
+    local lines, line = {}, ""
+    for word in text:gmatch("%S+") do
+        local t = (line == "") and word or (line .. " " .. word)
+        if tw(t, size) > maxw and line ~= "" then lines[#lines + 1] = line; line = word else line = t end
+    end
+    if line ~= "" then lines[#lines + 1] = line end
+    return lines
 end
 
--- UseGradient = false: the whole menu uses ONE flat colour (T.Accent). true: bars / sliders / outline use GradA -> GradB.
--- Switch it with Lib:SetGradient(true / false).
-local Lib = { Flags = {}, Objects = {}, Windows = {}, Notes = {}, Version = "1.0.5", alive = true, Uppercase = true, UseGradient = false }
--- Also published globally (ProjectFuzzUI is the ONLY global this file creates), so a loader that
--- loses the return value can still pick it up with getgenv().ProjectFuzzUI
-if genv then genv.ProjectFuzzUI = Lib end
-pcall(function() _G.ProjectFuzzUI = Lib end)
-
-----------------------------------------------------------------------
--- Theme (edit before CreateWindow)
-----------------------------------------------------------------------
-local T = {
-    Background = Color3.fromRGB(13, 12, 18),    -- slightly purple-tinted near-black (matches the concept UI)
-    Panel      = Color3.fromRGB(16, 15, 21),
-    Frame      = Color3.fromRGB(11, 10, 16),    -- the inner framed area that holds the boxes (under the tab bar)
-    Box        = Color3.fromRGB(21, 20, 28),
-    Border     = Color3.fromRGB(44, 42, 56),
-    Inner      = Color3.fromRGB(30, 28, 40),    -- the inner line inside every border (window + boxes); dim, so borders stay subtle
-    GradA      = Color3.fromRGB(130, 90, 255),  -- gradient start (only used while UI Gradient is on)
-    GradB      = Color3.fromRGB(210, 110, 255), -- gradient end (only used while UI Gradient is on)
-    Outline    = Color3.fromRGB(176, 124, 254), -- window outline while UI Gradient is on (flat mode uses Accent)
-    Accent     = Color3.fromRGB(176, 124, 255), -- THE flat menu colour (bars, slider fill, toggle fill, active tab, hover, outline)
-    Text       = Color3.fromRGB(205, 205, 215),
-    TextDim    = Color3.fromRGB(125, 122, 140),
-    White      = Color3.fromRGB(255, 255, 255),
-    Hover      = Color3.fromRGB(30, 28, 40),
-    TabActive  = Color3.fromRGB(30, 28, 40),
+--========================================================================
+-- Themes (all colors are animated toward the active theme)
+--========================================================================
+local THEMES = {
+    { name = "Default",         bg = rgb(18, 18, 23),  side = rgb(22, 22, 28),  group = rgb(25, 25, 32),  border = rgb(46, 46, 58),  text = rgb(236, 236, 244), dim = rgb(122, 122, 140), accent = rgb(112, 118, 255) },
+    { name = "Gruvbox",         bg = rgb(40, 40, 40),  side = rgb(50, 48, 47),  group = rgb(46, 44, 43),  border = rgb(80, 73, 69),  text = rgb(235, 219, 178), dim = rgb(146, 131, 116), accent = rgb(250, 189, 47) },
+    { name = "Everforest",      bg = rgb(45, 53, 59),  side = rgb(52, 63, 68),  group = rgb(50, 60, 65),  border = rgb(71, 82, 88),  text = rgb(211, 198, 170), dim = rgb(133, 146, 137), accent = rgb(167, 192, 128) },
+    { name = "Kanagawa",        bg = rgb(31, 31, 40),  side = rgb(22, 22, 29),  group = rgb(36, 36, 47),  border = rgb(54, 54, 70),  text = rgb(220, 215, 186), dim = rgb(114, 113, 105), accent = rgb(126, 156, 216) },
+    { name = "Catppuccin Mocha",bg = rgb(30, 30, 46),  side = rgb(24, 24, 37),  group = rgb(36, 36, 54),  border = rgb(69, 71, 90),  text = rgb(205, 214, 244), dim = rgb(127, 132, 156), accent = rgb(203, 166, 247) },
+    { name = "Oxocarbon",       bg = rgb(16, 17, 20),  side = rgb(21, 22, 26),  group = rgb(23, 24, 28),  border = rgb(40, 42, 48),  text = rgb(236, 238, 241), dim = rgb(128, 132, 140), accent = rgb(32, 201, 190) },
 }
-Lib.Theme = T
-
-local FONT
-for _, n in ipairs({ "Pixel", "Monospace", "System" }) do
-    local ok, f = pcall(function() return Drawing.Fonts[n] end) -- an unknown font name must not break loading
-    if ok and f ~= nil then FONT = f break end
-end
-if FONT == nil then FONT = 0 end
-Lib.Font = FONT
-
-local PAD, GAP, TPAD = 17, 6, 12 -- box padding / gap between boxes / tab bar padding
-local FOLD_IND = 8              -- rows inside a fold (e.g. under an enabled toggle) are pushed this far to the right
-local TITLE_H, TABBAR_Y, TABBAR_H = 22, 27, 21
-local CONTENT_Y = 55
-
-----------------------------------------------------------------------
--- Helpers
-----------------------------------------------------------------------
-local floor, max, min = math.floor, math.max, math.min
-local function clamp(v, lo, hi) if hi < lo then return lo end if v < lo then return lo end if v > hi then return hi end return v end
-local function U(s) s = tostring(s) if Lib.Uppercase then return string.upper(s) end return s end
-local function V2(x, y) return Vector2.new(x, y) end
-
--- the colour at position t (0..1) of the gradient; with UI Gradient off every position is the flat Accent
-local function gradAt(t)
-    if not Lib.UseGradient then return T.Accent end
-    local a, b = T.GradA, T.GradB
-    return Color3.new(a.R + (b.R - a.R) * t, a.G + (b.G - a.G) * t, a.B + (b.B - a.B) * t)
-end
-Lib.GradAt = gradAt
-
--- window / notification outline: its own colour in gradient mode, the flat Accent otherwise
-local function outlineCol()
-    local c = Lib.UseGradient and T.Outline or T.Accent
-    local b, k = T.Background, 0.45 -- the concept's window outline is a dim version of the accent
-    return Color3.new(b.R + (c.R - b.R) * k, b.G + (c.G - b.G) * k, b.B + (c.B - b.B) * k)
-end
-
--- a horizontal 2px gradient bar built from n small squares; add(class, props, ox, oy) creates one drawing
-local function gradBar(add, w, oy, n, zi)
-    for i = 1, n do
-        local x0, x1 = floor((i - 1) * w / n), floor(i * w / n)
-        local r = add("Square", { Filled = true, Color = gradAt((i - 0.5) / n), Size = V2(x1 - x0, 2), ZIndex = zi }, x0, oy)
-        if r then r.gt = (i - 0.5) / n end -- position in the gradient: lets SetColor recolor it later
+local C, Tgt = {}, {}
+local TOKENS = { "bg", "side", "group", "border", "text", "dim", "accent" }
+local function applyTheme(name, instant)
+    for _, t in ipairs(THEMES) do
+        if t.name == name then
+            for _, k in ipairs(TOKENS) do
+                Tgt[k] = t[k]
+                if instant or not C[k] then C[k] = t[k] end
+            end
+        end
     end
 end
-
-local viewSize
-do
-    local last = V2(1920, 1080)
-    viewSize = function()
-        local cam = Workspace.CurrentCamera
-        if cam then local v = cam.ViewportSize if v then last = v end end
-        return last
-    end
+local function stepTheme()
+    local a = 1 - exp(-9 * DT)
+    for k, v in pairs(Tgt) do C[k] = mix(C[k], v, a) end
+    C.track = mix(C.group, C.text, 0.15)
+    C.hover = mix(C.group, C.text, 0.07)
+    C.sel = mix(C.group, C.accent, 0.14)
+    C.popup = mix(C.bg, C.text, 0.04)
+    C.knob = mix(C.text, { 1, 1, 1 }, 0.5)
+    C.white = { 1, 1, 1 }
+    C.black = { 0, 0, 0 }
 end
+applyTheme("Oxocarbon", true)
+stepTheme()
 
-local function mk(class, props)
-    local d = Drawing.new(class)
-    for k, v in pairs(props) do d[k] = v end
-    if class == "Text" then d.Outline = false end
-    d.Visible = false
+--========================================================================
+-- Pooled drawing
+--========================================================================
+local pool, deadCount = {}, 0
+
+local function get(o, key, kind)
+    local ds = o.__d
+    if not ds then ds = {}; o.__d = ds end
+    local d = ds[key]
+    if not d then
+        d = { obj = Drawing.new(kind), shown = false, seen = 0, c = {} }
+        d.obj.Visible = false
+        ds[key] = d
+        pool[#pool + 1] = d
+    end
+    d.seen = frameId
     return d
 end
 
-local KEYNAMES = { [4] = "MB3", [5] = "MB4", [6] = "MB5", [8] = "BKSP", [9] = "TAB", [13] = "ENTER", [16] = "SHIFT", [17] = "CTRL",
-    [18] = "ALT", [20] = "CAPS", [27] = "ESC", [32] = "SPACE", [33] = "PGUP", [34] = "PGDN", [35] = "END", [36] = "HOME",
-    [37] = "LEFT", [38] = "UP", [39] = "RIGHT", [40] = "DOWN", [45] = "INS", [46] = "DEL", [160] = "LSHIFT", [161] = "RSHIFT",
-    [162] = "LCTRL", [163] = "RCTRL", [164] = "LALT", [165] = "RALT" }
-for i = 48, 57 do KEYNAMES[i] = string.char(i) end
-for i = 65, 90 do KEYNAMES[i] = string.char(i) end
-for i = 1, 12 do KEYNAMES[111 + i] = "F" .. i end
-for i = 0, 9 do KEYNAMES[96 + i] = "NUM" .. i end
-local function keyName(k) if not k or k == 0 then return "NONE" end return KEYNAMES[k] or ("K" .. k) end
-
-local function reg(id, obj, value)
-    if id then
-        Lib.Objects[id] = obj
-        Lib.Flags[id] = value
+local function release(o)
+    if o.__d then
+        for _, d in pairs(o.__d) do
+            pcall(function() d.obj:Remove() end)
+            d.dead = true; d.shown = false; deadCount = deadCount + 1
+        end
+        o.__d = nil
     end
 end
 
-----------------------------------------------------------------------
--- Classes
-----------------------------------------------------------------------
-local Window, Tab, Section = {}, {}, {}
-Window.__index, Tab.__index, Section.__index = Window, Tab, Section
-
--- a drawing + where it sits. org = table with x / y (box or popup origin, window-relative), nil = window origin
-function Window:_rec(list, class, props, ox, oy, org, tab, sec)
-    local rec = { d = mk(class, props), ox = ox, oy = oy, org = org, tab = tab, sec = sec, v = false, col = props.Color }
-    list[#list + 1] = rec
-    self:_put(rec)
-    self.syncDirty = true
-    return rec
-end
-
-function Window:_abs(o)
-    local org = o.org
-    return self.x + (org and org.x or 0) + o.ox, self.y + (org and org.y or 0) + o.oy
-end
-
-function Window:_put(rec)
-    local x, y = self:_abs(rec)
-    rec.d.Position = V2(x, y)
-end
-
-function Window:_vis(o)
-    if not self.visible or o.hidden then return false end
-    if o.fold and not o.fold.open then return false end -- inside a closed fold (see Section:BeginFold)
-    if o.tab and self.active ~= o.tab then return false end
-    local s = o.sec
-    if s and not s:isActive() then return false end
-    return true
-end
-
-function Window:_refresh(list)
-    for i = 1, #list do
-        local r = list[i]
-        local v = self:_vis(r)
-        if v ~= r.v then r.v = v r.d.Visible = v end
+local function sweep()
+    if deadCount > 80 then
+        local np = {}
+        for i = 1, #pool do if not pool[i].dead then np[#np + 1] = pool[i] end end
+        pool = np; deadCount = 0
+    end
+    for i = 1, #pool do
+        local d = pool[i]
+        if d.shown and d.seen ~= frameId then d.obj.Visible = false; d.shown = false end
     end
 end
 
-function Window:_placeList(list)
-    for i = 1, #list do self:_put(list[i]) end
+local function set(d, k, v)
+    local c = d.c
+    if c[k] ~= v then c[k] = v; d.obj[k] = v end
+end
+local function setcol(d, col)
+    local c, r, g, b = d.c, col[1], col[2], col[3]
+    if c.r ~= r or c.g ~= g or c.b ~= b then
+        c.r = r; c.g = g; c.b = b
+        d.obj.Color = Color3.new(r, g, b)
+    end
+end
+local function show(d) if not d.shown then d.obj.Visible = true; d.shown = true end end
+local function px(x) return floor(OX + x * SCL + 0.5) end
+local function py(y) return floor(OY + y * SCL + 0.5) end
+
+local function Rect(o, key, x, y, w, h, col, a, z, filled, corner, thick)
+    a = (a or 1) * GA
+    if a < 0.01 or w <= 0 or h <= 0 then return end
+    if CLIP0 then
+        if y >= CLIP1 or y + h <= CLIP0 then return end
+        if y < CLIP0 then h = h - (CLIP0 - y); y = CLIP0 end
+        if y + h > CLIP1 then h = CLIP1 - y end
+        if h <= 0 then return end
+    end
+    local d = get(o, key, "Square")
+    local c, obj = d.c, d.obj
+    local X, Y, SX, SY = px(x), py(y), floor(w * SCL + 0.5), floor(h * SCL + 0.5)
+    if c.px ~= X or c.py ~= Y then c.px = X; c.py = Y; obj.Position = Vector2.new(X, Y) end
+    if c.sx ~= SX or c.sy ~= SY then c.sx = SX; c.sy = SY; obj.Size = Vector2.new(SX, SY) end
+    setcol(d, col)
+    set(d, "Transparency", floor(a * 100 + 0.5) / 100)
+    set(d, "ZIndex", z)
+    local f = filled ~= false
+    set(d, "Filled", f)
+    set(d, "Corner", floor(min((corner or 0) * SCL, SX / 2, SY / 2)))
+    if not f then set(d, "Thickness", thick or 1) end
+    show(d)
 end
 
-function Window:_sync()
-    self.syncDirty = false
-    self:_refresh(self.chrome)
-    if self.active then self:_refresh(self.active.recs) end
-    if self.popup then self:_refresh(self.popup.recs) end
+local function Box2(o, key, x, y, w, h, fill, border, a, z, corner)
+    Rect(o, key .. "b", x, y, w, h, border, a, z, true, corner)
+    Rect(o, key .. "f", x + 1, y + 1, w - 2, h - 2, fill, a, z + 1, true, max(0, (corner or 0) - 1))
 end
 
-function Window:_removeList(list)
-    for i = 1, #list do pcall(function() list[i].d:Remove() end) end
+local FONT, FONTB = Drawing.Fonts.System, Drawing.Fonts.SystemBold
+-- cy is the vertical CENTER of the text; align: "l" (default), "r", "c"
+local function Txt(o, key, s, x, cy, col, a, z, size, bold, align)
+    a = (a or 1) * GA
+    if a < 0.01 or s == nil or s == "" then return end
+    size = size or 13
+    if CLIP0 and (cy - size / 2 < CLIP0 - 1 or cy + size / 2 > CLIP1 + 1) then return end
+    local d = get(o, key, "Text")
+    local w = tw(s, size)
+    if align == "r" then x = x - w elseif align == "c" then x = x - w / 2 end
+    local c, obj = d.c, d.obj
+    local X, Y = px(x), py(cy - size / 2 - 1)
+    if c.px ~= X or c.py ~= Y then c.px = X; c.py = Y; obj.Position = Vector2.new(X, Y) end
+    set(d, "Text", s)
+    setcol(d, col)
+    set(d, "Transparency", floor(a * 100 + 0.5) / 100)
+    set(d, "ZIndex", z)
+    set(d, "FontSize", floor(size * SCL + 0.5))
+    set(d, "Font", bold and FONTB or FONT)
+    set(d, "Outline", false)
+    set(d, "Center", false)
+    show(d)
 end
 
-function Window:_hit(h)
-    self.hits[#self.hits + 1] = h
-    return h
+local function Ln(o, key, x1, y1, x2, y2, col, a, z, th)
+    a = (a or 1) * GA
+    if a < 0.01 then return end
+    if CLIP0 and (y1 < CLIP0 or y1 > CLIP1 or y2 < CLIP0 or y2 > CLIP1) then return end
+    local d = get(o, key, "Line")
+    local c, obj = d.c, d.obj
+    local ax, ay, bx, by = px(x1), py(y1), px(x2), py(y2)
+    if c.ax ~= ax or c.ay ~= ay then c.ax = ax; c.ay = ay; obj.From = Vector2.new(ax, ay) end
+    if c.bx ~= bx or c.by ~= by then c.bx = bx; c.by = by; obj.To = Vector2.new(bx, by) end
+    setcol(d, col)
+    set(d, "Transparency", floor(a * 100 + 0.5) / 100)
+    set(d, "ZIndex", z)
+    set(d, "Thickness", th or 1)
+    show(d)
 end
 
-----------------------------------------------------------------------
--- Popups (dropdown list / colour picker): one at a time, drawn above everything
-----------------------------------------------------------------------
-function Window:_openPopup(ax, ay, w, h)
-    self:_closePopup()
-    local p = { org = { x = clamp(ax, 2, self.w - w - 2), y = clamp(ay, 2, self.h - h - 2) }, w = w, h = h, recs = {}, hits = {} }
-    self.popup = p
-    self:_rec(p.recs, "Square", { Filled = true, Color = T.Panel, Size = V2(w, h), ZIndex = 30 }, 0, 0, p.org)
-    self:_rec(p.recs, "Square", { Filled = false, Thickness = 1, Color = T.Accent, Size = V2(w, h), ZIndex = 31 }, 0, 0, p.org)
+local function Circ(o, key, x, y, r, col, a, z, filled, th)
+    a = (a or 1) * GA
+    if a < 0.01 then return end
+    if CLIP0 and (y - r < CLIP0 or y + r > CLIP1) then return end
+    local d = get(o, key, "Circle")
+    local c, obj = d.c, d.obj
+    local X, Y = px(x), py(y)
+    if c.px ~= X or c.py ~= Y then c.px = X; c.py = Y; obj.Position = Vector2.new(X, Y) end
+    set(d, "Radius", r * SCL)
+    set(d, "NumSides", r > 8 and 40 or 24)
+    setcol(d, col)
+    set(d, "Transparency", floor(a * 100 + 0.5) / 100)
+    set(d, "ZIndex", z)
+    set(d, "Filled", filled ~= false)
+    if filled == false then set(d, "Thickness", th or 1) end
+    show(d)
+end
+
+local function Tri(o, key, ax, ay, bx, by, cx, cy, col, a, z)
+    a = (a or 1) * GA
+    if a < 0.01 then return end
+    if CLIP0 and (ay < CLIP0 or ay > CLIP1 or by < CLIP0 or by > CLIP1 or cy < CLIP0 or cy > CLIP1) then return end
+    local d = get(o, key, "Triangle")
+    local c, obj = d.c, d.obj
+    local A, B, Cc = { px(ax), py(ay) }, { px(bx), py(by) }, { px(cx), py(cy) }
+    if c.a1 ~= A[1] or c.a2 ~= A[2] then c.a1 = A[1]; c.a2 = A[2]; obj.PointA = Vector2.new(A[1], A[2]) end
+    if c.b1 ~= B[1] or c.b2 ~= B[2] then c.b1 = B[1]; c.b2 = B[2]; obj.PointB = Vector2.new(B[1], B[2]) end
+    if c.c1 ~= Cc[1] or c.c2 ~= Cc[2] then c.c1 = Cc[1]; c.c2 = Cc[2]; obj.PointC = Vector2.new(Cc[1], Cc[2]) end
+    setcol(d, col)
+    set(d, "Transparency", floor(a * 100 + 0.5) / 100)
+    set(d, "ZIndex", z)
+    set(d, "Filled", true)
+    show(d)
+end
+
+--========================================================================
+-- Animation + input helpers
+--========================================================================
+local function ani(o, key, target, speed)
+    local a = o.__a
+    if not a then a = {}; o.__a = a end
+    local v = a[key]
+    if v == nil then a[key] = target; return target end
+    v = v + (target - v) * (1 - exp(-(speed or 14) * DT))
+    if abs(v - target) < 0.001 then v = target end
+    a[key] = v
+    return v
+end
+
+local function hot(x, y, w, h)
+    if not ctxOK then return false end
+    if CLIP0 and (M.y < CLIP0 or M.y > CLIP1) then return false end
+    return M.x >= x and M.x <= x + w and M.y >= y and M.y <= y + h
+end
+
+-- keyboard (polled once per frame per key)
+local kd, kp, kf = {}, {}, {}
+local function key(vk)
+    if kf[vk] ~= frameId then
+        kf[vk] = frameId
+        local d = iskeypressed(vk) and true or false
+        kp[vk] = d and not kd[vk]
+        kd[vk] = d
+    end
+    return kd[vk], kp[vk]
+end
+local function primeKeys()
+    for vk = 1, 254 do
+        kf[vk] = frameId
+        kd[vk] = iskeypressed(vk) and true or false
+        kp[vk] = false
+    end
+end
+
+local KN = { [1] = "LMB", [2] = "RMB", [4] = "MMB", [5] = "X1", [6] = "X2", [8] = "Back", [9] = "Tab", [13] = "Enter",
+    [16] = "Shift", [17] = "Ctrl", [18] = "Alt", [20] = "Caps", [27] = "Esc", [32] = "Space", [33] = "PgUp", [34] = "PgDn",
+    [35] = "End", [36] = "Home", [37] = "Left", [38] = "Up", [39] = "Right", [40] = "Down", [45] = "Ins", [46] = "Del",
+    [160] = "LShift", [161] = "RShift", [162] = "LCtrl", [163] = "RCtrl", [164] = "LAlt", [165] = "RAlt" }
+for i = 0x30, 0x39 do KN[i] = string.char(i) end
+for i = 0x41, 0x5A do KN[i] = string.char(i) end
+for i = 1, 12 do KN[0x6F + i] = "F" .. i end
+for i = 0, 9 do KN[0x60 + i] = "Num" .. i end
+local function keyName(vk) if not vk or vk == 0 then return "None" end return KN[vk] or ("K" .. vk) end
+
+local TYPEVK = {}
+for vk = 0x30, 0x39 do TYPEVK[#TYPEVK + 1] = vk end
+for vk = 0x41, 0x5A do TYPEVK[#TYPEVK + 1] = vk end
+TYPEVK[#TYPEVK + 1] = 0x20; TYPEVK[#TYPEVK + 1] = 0xBD; TYPEVK[#TYPEVK + 1] = 0xBE
+local function vkChar(vk, shift)
+    if vk >= 0x41 and vk <= 0x5A then local ch = string.char(vk); return shift and ch or ch:lower() end
+    if vk >= 0x30 and vk <= 0x39 then return string.char(vk) end
+    if vk == 0x20 then return " " end
+    if vk == 0xBD then return shift and "_" or "-" end
+    if vk == 0xBE then return "." end
+end
+
+local function startCapture(owner, setfn) CAP = { owner = owner, set = setfn }; primeKeys() end
+local function focusText(o) TI.owner = o; TI.bs = 0; primeKeys() end
+
+--========================================================================
+-- Icons (primitives only)
+--========================================================================
+local function Icon(o, k, name, cx, cy, s, col, a, z)
+    local h = s / 2
+    if name == "crosshair" then
+        Circ(o, k .. "1", cx, cy, h - 1, col, a, z, false, 1.5)
+        Circ(o, k .. "2", cx, cy, 1.5, col, a, z, true)
+    elseif name == "brush" then
+        Ln(o, k .. "1", cx - h + 2, cy + h - 2, cx + h - 2, cy - h + 2, col, a, z, 2.6)
+        Circ(o, k .. "2", cx - h + 2, cy + h - 2, 2.2, col, a, z, true)
+    elseif name == "mountain" then
+        Tri(o, k .. "1", cx - h, cy + h - 2, cx - 1, cy - h + 2, cx + h - 4, cy + h - 2, col, a, z)
+        Tri(o, k .. "2", cx - 1, cy + h - 2, cx + 3, cy - 2, cx + h + 1, cy + h - 2, col, a, z)
+    elseif name == "blade" then
+        Ln(o, k .. "1", cx - h + 2, cy + h - 2, cx + h - 2, cy - h + 2, col, a, z, 2.4)
+        Ln(o, k .. "2", cx - 4, cy + 1, cx + 1, cy + 6, col, a, z, 1.6)
+    elseif name == "bolt" then
+        Ln(o, k .. "1", cx + 2, cy - h + 1, cx - 3, cy + 1, col, a, z, 2.2)
+        Ln(o, k .. "2", cx - 3, cy + 1, cx + 2, cy + 1, col, a, z, 2.2)
+        Ln(o, k .. "3", cx + 2, cy + 1, cx - 2, cy + h - 1, col, a, z, 2.2)
+    elseif name == "gear" then
+        Circ(o, k .. "1", cx, cy, h - 3, col, a, z, false, 2.2)
+        Circ(o, k .. "2", cx, cy, 1.6, col, a, z, true)
+        Ln(o, k .. "3", cx, cy - h + 1, cx, cy - h + 3, col, a, z, 2)
+        Ln(o, k .. "4", cx, cy + h - 1, cx, cy + h - 3, col, a, z, 2)
+        Ln(o, k .. "5", cx - h + 1, cy, cx - h + 3, cy, col, a, z, 2)
+        Ln(o, k .. "6", cx + h - 1, cy, cx + h - 3, cy, col, a, z, 2)
+    elseif name == "user" then
+        Circ(o, k .. "1", cx, cy - 3, 3.2, col, a, z, true)
+        Tri(o, k .. "2", cx - h + 1, cy + h - 1, cx, cy + 1, cx + h - 1, cy + h - 1, col, a, z)
+    elseif name == "file" then
+        Rect(o, k .. "1", cx - h + 3, cy - h + 1, s - 6, s - 2, col, a, z, false, 2, 1.4)
+        Ln(o, k .. "2", cx - 2, cy - 1, cx + 2, cy - 1, col, a, z, 1.2)
+        Ln(o, k .. "3", cx - 2, cy + 2, cx + 2, cy + 2, col, a, z, 1.2)
+    elseif name == "monitor" then
+        Rect(o, k .. "1", cx - h + 1, cy - h + 2, s - 2, s - 6, col, a, z, false, 2, 1.4)
+        Ln(o, k .. "2", cx - 3, cy + h - 1, cx + 3, cy + h - 1, col, a, z, 1.6)
+    elseif name == "bell" then
+        Circ(o, k .. "1", cx, cy - 1, h - 3, col, a, z, false, 1.6)
+        Ln(o, k .. "2", cx - h + 2, cy + 3, cx + h - 2, cy + 3, col, a, z, 1.6)
+        Circ(o, k .. "3", cx, cy + h - 1, 1.3, col, a, z, true)
+    elseif name == "plus" then
+        Ln(o, k .. "1", cx - h + 2, cy, cx + h - 2, cy, col, a, z, 1.6)
+        Ln(o, k .. "2", cx, cy - h + 2, cx, cy + h - 2, col, a, z, 1.6)
+    elseif name == "x" then
+        Ln(o, k .. "1", cx - h + 3, cy - h + 3, cx + h - 3, cy + h - 3, col, a, z, 1.5)
+        Ln(o, k .. "2", cx - h + 3, cy + h - 3, cx + h - 3, cy - h + 3, col, a, z, 1.5)
+    elseif name == "trash" then
+        Ln(o, k .. "1", cx - h + 3, cy - h + 4, cx + h - 3, cy - h + 4, col, a, z, 1.5)
+        Ln(o, k .. "2", cx - 2, cy - h + 2, cx + 2, cy - h + 2, col, a, z, 1.5)
+        Rect(o, k .. "3", cx - h + 4, cy - h + 5, s - 8, s - 8, col, a, z, false, 1, 1.4)
+    elseif name == "check" then
+        Ln(o, k .. "1", cx - h + 3, cy, cx - 1, cy + h - 4, col, a, z, 2)
+        Ln(o, k .. "2", cx - 1, cy + h - 4, cx + h - 2, cy - h + 4, col, a, z, 2)
+    elseif name == "search" then
+        Circ(o, k .. "1", cx - 1, cy - 1, h - 3, col, a, z, false, 1.6)
+        Ln(o, k .. "2", cx + h - 5, cy + h - 5, cx + h - 1, cy + h - 1, col, a, z, 1.8)
+    elseif name == "grid" then
+        for r = -1, 1 do for q = -1, 1 do
+            Rect(o, k .. "g" .. r .. q, cx + q * 4 - 1, cy + r * 4 - 1, 2.4, 2.4, col, a, z, true, 1)
+        end end
+    elseif name == "download" then
+        Ln(o, k .. "1", cx, cy - h + 3, cx, cy + 2, col, a, z, 1.8)
+        Tri(o, k .. "2", cx - 4, cy - 1, cx + 4, cy - 1, cx, cy + 4, col, a, z)
+        Ln(o, k .. "3", cx - h + 3, cy + h - 3, cx + h - 3, cy + h - 3, col, a, z, 1.8)
+    elseif name == "info" then
+        Circ(o, k .. "1", cx, cy, h - 1, col, a, z, false, 1.5)
+        Ln(o, k .. "2", cx, cy - 1, cx, cy + 4, col, a, z, 1.6)
+        Circ(o, k .. "3", cx, cy - 3.5, 1, col, a, z, true)
+    else
+        Rect(o, k .. "1", cx - h + 3, cy - h + 3, s - 6, s - 6, col, a, z, true, 3)
+    end
+end
+
+--========================================================================
+-- Shared controls
+--========================================================================
+local function SwitchCtl(o, k, sx, cy, on, z)
+    local sw, sh = 34, 18
+    local sy = cy - sh / 2
+    local hv = hot(sx, sy, sw, sh)
+    local t = ani(o, k .. "t", on and 1 or 0, 16)
+    local h = ani(o, k .. "h", hv and 1 or 0, 14)
+    Rect(o, k .. "a", sx, sy, sw, sh, mix(mix(C.track, C.text, h * 0.08), C.accent, t), 1, z, true, sh / 2)
+    Circ(o, k .. "b", sx + sh / 2 + (sw - sh) * t, cy, 6.2 + h * 0.7, mix(C.accent, C.white, t), 1, z + 2, true)
+    return hv
+end
+
+local function Segmented(o, k, x, cy, w, h, opts, sel, z)
+    local y = cy - h / 2
+    Box2(o, k .. "bg", x, y, w, h, C.bg, C.border, 1, z, 6)
+    local sw = (w - 4) / #opts
+    local tx = ani(o, k .. "x", x + 2 + (sel - 1) * sw, 18)
+    Rect(o, k .. "th", tx, y + 2, sw, h - 4, C.accent, 1, z + 2, true, 4)
+    local res
+    for i, name in ipairs(opts) do
+        local ix = x + 2 + (i - 1) * sw
+        local hv = hot(ix, y, sw, h)
+        if hv and M.pressed then res = i end
+        local hh = ani(o, k .. "h" .. i, hv and 1 or 0, 14)
+        local col = (i == sel) and C.white or mix(C.dim, C.text, hh)
+        Txt(o, k .. "t" .. i, name, ix + sw / 2, cy, col, 1, z + 4, 11.5, true, "c")
+    end
+    return res
+end
+
+local function Button(o, k, x, y, w, h, label, z)
+    local hv = hot(x, y, w, h)
+    local hh = ani(o, k .. "h", hv and 1 or 0, 16)
+    local pr = ani(o, k .. "p", (hv and M.down) and 1 or 0, 26)
+    local fill = mix(mix(C.group, C.text, 0.04 + 0.05 * hh), C.accent, 0.25 * pr)
+    Box2(o, k .. "bx", x, y + pr, w, h, fill, mix(C.border, C.accent, hh * 0.7), 1, z, 6)
+    Txt(o, k .. "t", label, x + w / 2, y + h / 2 + pr, mix(C.dim, C.text, max(hh, 0.6)), 1, z + 3, 12, true, "c")
+    return hv and M.pressed
+end
+
+local function IconBtn(o, k, icon, x, y, w, h, z)
+    local hv = hot(x, y, w, h)
+    local ha = ani(o, k .. "h", hv and 1 or 0, 16)
+    Box2(o, k .. "bx", x, y, w, h, mix(C.group, C.text, 0.03 + 0.07 * ha), mix(C.border, C.accent, ha * 0.6), 1, z, 5)
+    Icon(o, k .. "i", icon, x + w / 2, y + h / 2, 12, mix(C.dim, C.text, ha), 1, z + 2)
+    return hv and M.pressed
+end
+
+local function KeyPillCtl(o, k, x, y, w, h, txt, listening, z)
+    local hv = hot(x, y, w, h)
+    local ha = ani(o, k .. "h", hv and 1 or 0, 16)
+    local la = ani(o, k .. "l", listening and 1 or 0, 16)
+    Box2(o, k .. "bx", x, y, w, h, mix(C.bg, C.hover, ha * 0.5), mix(C.border, C.accent, max(la, ha * 0.5)), 1, z, 5)
+    Txt(o, k .. "t", txt, x + w / 2, y + h / 2, mix(C.text, C.accent, la), 1, z + 2, 12, true, "c")
+    return hv and M.pressed
+end
+
+--========================================================================
+-- Popups (dropdowns, bind settings, popovers)
+--========================================================================
+local POPD = {}
+local function openPop(kind, f)
+    local o = POPD[kind]
+    if not o then o = { kind = kind }; POPD[kind] = o end
+    o.__a = { __h = 24, __t = 0 }
+    o.closing = false
+    o.born = frameId
+    for k, v in pairs(f) do o[k] = v end
+    POP = o
+end
+local function closePop() if POP and not POP.closing then POP.closing = true end end
+
+local MODES = { "Toggle", "Hold", "Off" }
+local function modeIndex(m) for i, v in ipairs(MODES) do if v == m then return i end end return 1 end
+
+local function dropContent(p, x, y, z)
+    local w = p.owner
+    for i, name in ipairs(w.items) do
+        local ry = y + 4 + (i - 1) * 24
+        local hv = hot(x + 3, ry, p.w - 6, 24)
+        local ha = ani(p, "h" .. i, hv and 1 or 0, 20)
+        local sel = w.multi and w.set[name] or (not w.multi and w.value == i)
+        local sa = ani(p, "s" .. i, sel and 1 or 0, 16)
+        if ha > 0.01 then Rect(p, "hv" .. i, x + 3, ry, p.w - 6, 24, C.hover, ha, z, true, 5) end
+        if w.multi then
+            Box2(p, "cb" .. i, x + 10, ry + 5, 14, 14, mix(C.bg, C.accent, sa), mix(C.border, C.accent, sa), 1, z + 1, 4)
+            if sa > 0.05 then Icon(p, "ck" .. i, "check", x + 17, ry + 12, 12, C.white, sa, z + 4) end
+            Txt(p, "t" .. i, name, x + 32, ry + 12, C.text, 1, z + 2, 12.5, true)
+        else
+            if sa > 0.01 then Rect(p, "bar" .. i, x + 5, ry + 5, 2.5, 14, C.accent, sa, z + 1, true, 1) end
+            Txt(p, "t" .. i, name, x + 16 + 2 * sa, ry + 12, C.text, 1, z + 2, 12.5, true)
+        end
+        if hv and M.pressed and p.born ~= frameId then
+            w:pick(i)
+            if not w.multi then p.closing = true end
+        end
+    end
+end
+
+local function subContent(p, x, y, z)
+    local ow = p.owner
+    Txt(p, "t", ow.title, x + 12, y + 20, C.text, 1, z, 13.5, true)
+    Ln(p, "sep", x + 10, y + 36, x + p.w - 10, y + 36, C.border, 1, z, 1)
+    local cy = y + 42
+    for _, r in ipairs(ow.sub.rows) do
+        r:draw(x + 12, cy, p.w - 24, z + 2)
+        cy = cy + r.h
+    end
+end
+
+local function bindContent(p, x, y, z)
+    local it, bw = p.owner, p.w
+    Txt(p, "ti", "Bind Settings", x + 14, y + 20, C.text, 1, z, 13.5, true)
+    local by = y + 40
+    local i = 1
+    while i <= #it.binds do
+        local b = it.binds[i]
+        local k = "b" .. i
+        Txt(p, k .. "h", "Bind " .. i, x + 14, by + 14, C.text, 1, z, 12.5, true)
+        if IconBtn(p, k .. "d", "trash", x + bw - 36, by + 3, 22, 22, z) then table.remove(it.binds, i); break end
+        local ky = by + 28
+        Txt(p, k .. "kl", "Key", x + 14, ky + 14, C.text, 1, z, 12, false)
+        local listening = CAP and CAP.owner == b
+        if KeyPillCtl(p, k .. "kp", x + bw - 14 - 22 - 6 - 64, ky + 3, 64, 22, listening and "..." or keyName(b.vk), listening, z) then
+            startCapture(b, function(vk) b.vk = vk; b.last = false end)
+        end
+        if IconBtn(p, k .. "ke", "x", x + bw - 36, ky + 3, 22, 22, z) then b.vk = 0 end
+        local my = by + 56
+        Txt(p, k .. "ml", "Mode", x + 14, my + 14, C.text, 1, z, 12, false)
+        local r = Segmented(p, k .. "m", x + bw - 14 - 138, my + 14, 138, 22, MODES, modeIndex(b.mode), z)
+        if r then b.mode = MODES[r] end
+        local sy = by + 84
+        Txt(p, k .. "sl", "Show in list", x + 14, sy + 14, C.text, 1, z, 12, false)
+        if SwitchCtl(p, k .. "sw", x + bw - 14 - 34, sy + 14, b.show, z) and M.pressed then b.show = not b.show end
+        by = by + 120
+        i = i + 1
+    end
+    if Button(p, "add", x + 14, by - 2, bw - 28, 24, "+ Add bind", z) then
+        it.binds[#it.binds + 1] = { vk = 0, mode = "Toggle", show = true, last = false }
+    end
+end
+
+local openDrop, openBindPop, openSubPop, openSwatchPop
+openDrop = function(w, x, y, cw)
+    openPop("drop", { owner = w, x = x, y = y, w = cw, content = dropContent,
+        measure = function(p) return #p.owner.items * 24 + 8 end })
+end
+openBindPop = function(item, ax, ay)
+    openPop("bind", { owner = item, x = ax - 190, y = ay + 6, w = 216, content = bindContent,
+        measure = function(p) return 40 + #p.owner.binds * 120 + 34 end })
+end
+openSubPop = function(item, ax, ay)
+    openPop("sub", { owner = item, x = ax, y = ay, w = item.pw or 200, content = subContent,
+        measure = function(p)
+            local h = 48
+            for _, r in ipairs(p.owner.sub.rows) do h = h + r.h end
+            return h
+        end })
+end
+
+--========================================================================
+-- Widget kinds
+--========================================================================
+local Kinds = {}
+for _, k in ipairs({ "switch", "slider", "choice", "multi", "popover", "keypill", "entry", "buttons", "themes", "caption" }) do
+    Kinds[k] = {}
+    Kinds[k].mt = { __index = Kinds[k] }
+end
+local function newItem(kind, t) t.kind = kind; return setmetatable(t, Kinds[kind].mt) end
+
+-- Switch ---------------------------------------------------------------
+function Kinds.switch.Get(w) return w.value end
+function Kinds.switch.Set(w, v) w.value = v and true or false; if w.callback then w.callback(w.value) end end
+function Kinds.switch.draw(w, x, y, wd, z)
+    local cy = y + 13
+    Txt(w, "l", w.label, x, cy, w.dim and C.dim or C.text, 1, z, 12.5, not w.dim)
+    local sx = x + wd - 34
+    if SwitchCtl(w, "s", sx, cy, w.value, z) and M.pressed then w:Set(not w.value) end
+    local rx = sx - 8
+    if w.color then
+        local sh = hot(rx - 16, cy - 8, 16, 16)
+        local ha = ani(w, "swh", sh and 1 or 0, 14)
+        Rect(w, "swb", rx - 16 - ha, cy - 8 - ha, 16 + 2 * ha, 16 + 2 * ha, C.border, 1, z, true, 5)
+        Rect(w, "swc", rx - 15, cy - 7, 14, 14, w.color, 1, z + 2, true, 4)
+        if sh and M.pressed then openSwatchPop(w, rx - 16, cy + 10) end
+        rx = rx - 24
+    end
+    if w.bindable then
+        local bx = rx - 22
+        local bh = hot(bx, cy - 10, 22, 20)
+        local ha = ani(w, "bdh", bh and 1 or 0, 14)
+        Rect(w, "bdbg", bx, cy - 10, 22, 20, C.hover, ha, z, true, 5)
+        local col = mix(C.dim, C.text, ha)
+        for i = -1, 1 do Circ(w, "bd" .. i, bx + 11 + i * 5, cy, 1.5, col, 1, z + 2, true) end
+        if bh and M.pressed then openBindPop(w, bx, cy + 10) end
+    end
+end
+
+-- Slider ---------------------------------------------------------------
+local function snap(w, v)
+    if w.step and w.step > 0 then v = floor(v / w.step + 0.5) * w.step end
+    return clamp(v, w.min, w.max)
+end
+function Kinds.slider.Get(w) return w.value end
+function Kinds.slider.Set(w, v) w.value = snap(w, v); if w.callback then w.callback(w.value) end end
+function Kinds.slider.draw(w, x, y, wd, z)
+    local cy = y + 13
+    Txt(w, "l", w.label, x, cy, C.text, 1, z, 12.5, true)
+    if w.dot then
+        Circ(w, "dot", x + tw(w.label, 12.5) + 9, cy + 0.5, 2.6, C.accent, 0.55 + 0.45 * sin(tick() * 3), z, true)
+    end
+    local v = w.value
+    local isOff = w.zeroText and v <= w.min
+    local txt = isOff and w.zeroText or string.format("%." .. (w.dec or 0) .. "f%s", v, w.suffix or "")
+    local pw = max(46, tw(txt, 11.5) + 14)
+    local px_ = x + wd - pw
+    local phv = hot(px_, cy - 9, pw, 18)
+    local drag = (dragOwner == w)
+    if not w.noTrack then
+        local tx0 = x + (w.trackX or 104)
+        local tx1 = px_ - 12
+        local len = tx1 - tx0
+        local hv = hot(tx0 - 5, cy - 9, len + 10, 18)
+        if hv and M.pressed and not dragOwner then dragOwner = w; drag = true end
+        if dragOwner == w then
+            if M.down then w:Set(w.min + (w.max - w.min) * clamp((M.x - tx0) / len, 0, 1)) else dragOwner = nil; drag = false end
+        end
+        local frac = (w.value - w.min) / (w.max - w.min)
+        local fa = ani(w, "f", frac, 22)
+        local act = ani(w, "a", (hv or drag) and 1 or 0, 16)
+        Rect(w, "tr", tx0, cy - 1.5, len, 3, C.track, 1, z, true, 1.5)
+        Rect(w, "fl", tx0, cy - 1.5, max(0, len * fa), 3, C.accent, 1, z + 1, true, 1.5)
+        Circ(w, "kn", tx0 + len * fa, cy, 4 + act * 1.4, C.knob, 1, z + 2, true)
+    else
+        if phv and M.pressed and not dragOwner then dragOwner = w; drag = true; w.dx0 = M.x; w.dv0 = w.value end
+        if dragOwner == w then
+            if M.down then w:Set(w.dv0 + (M.x - w.dx0) * (w.max - w.min) / 140) else dragOwner = nil; drag = false end
+        end
+    end
+    local pa = ani(w, "pa", isOff and 0 or 1, 12)
+    local ph = ani(w, "ph", (phv or drag) and 1 or 0, 14)
+    Box2(w, "pl", px_, cy - 9, pw, 18, mix(C.group, C.accent, 0.12 * pa + 0.05 * ph), mix(C.border, C.accent, max(pa * 0.9, ph * 0.6)), 1, z, 5)
+    Txt(w, "pv", txt, px_ + pw / 2, cy, mix(C.dim, C.accent, pa), 1, z + 2, 11.5, true, "c")
+end
+
+-- Choice (single dropdown) ---------------------------------------------
+function Kinds.choice.Get(w) return w.items[w.value] end
+function Kinds.choice.Set(w, i) w:pick(i) end
+function Kinds.choice.pick(w, i) w.value = i; if w.callback then w.callback(i, w.items[i]) end end
+function Kinds.choice.Text(w) return w.items[w.value] or "" end
+
+local function dropCtl(w, x, y, wd, z)
+    local H_ = w.bare and 20 or 26
+    local cy = y + H_ / 2
+    if not w.bare then Txt(w, "l", w.label, x, cy, C.text, 1, z, 12.5, true) end
+    local cw = w.cw
+    local cx = w.bare and x or (x + wd - cw)
+    local chh = 20
+    local top = cy - chh / 2
+    local isOpen = POP and POP.owner == w and not POP.closing
+    local hv = hot(cx, top, cw, chh)
+    local ha = ani(w, "h", hv and 1 or 0, 14)
+    local oa = ani(w, "o", isOpen and 1 or 0, 16)
+    Box2(w, "bx", cx, top, cw, chh, mix(C.bg, C.hover, ha * 0.6), mix(C.border, C.accent, max(oa, ha * 0.4)), 1, z, 5)
+    Txt(w, "v", fit(w:Text(), cw - 26, 12), cx + 8, cy, C.text, 1, z + 2, 12, false)
+    local ccx, d = cx + cw - 11, 1 - 2 * oa
+    local col = mix(C.dim, C.text, max(ha, oa))
+    Ln(w, "c1", ccx - 3.5, cy - 1.5 * d, ccx, cy + 1.5 * d, col, 1, z + 2, 1.4)
+    Ln(w, "c2", ccx, cy + 1.5 * d, ccx + 3.5, cy - 1.5 * d, col, 1, z + 2, 1.4)
+    if hv and M.pressed then openDrop(w, cx, top + chh + 4, cw) end
+end
+Kinds.choice.draw = dropCtl
+
+-- Multi dropdown -------------------------------------------------------
+function Kinds.multi.Get(w) return w.set end
+function Kinds.multi.Set(w, v) w.set = v end
+function Kinds.multi.pick(w, i)
+    local n = w.items[i]
+    w.set[n] = not w.set[n] or nil
+    if w.callback then w.callback(w.set) end
+end
+function Kinds.multi.Text(w)
+    local t = {}
+    for _, n in ipairs(w.items) do if w.set[n] then t[#t + 1] = n end end
+    return #t > 0 and table.concat(t, ", ") or "None"
+end
+Kinds.multi.draw = dropCtl
+
+-- Popover trigger (>> button) ----------------------------------------
+function Kinds.popover.draw(w, x, y, wd, z)
+    local cy = y + 13
+    Txt(w, "l", w.label, x, cy, C.dim, 1, z, 12.5, false)
+    local bx, bw, bh = x + wd - 36, 36, 18
+    local hv = hot(bx, cy - 9, bw, bh)
+    local isOpen = POP and POP.owner == w and not POP.closing
+    local ha = ani(w, "h", hv and 1 or 0, 14)
+    local oa = ani(w, "o", isOpen and 1 or 0, 14)
+    Box2(w, "bx", bx, cy - 9, bw, bh, mix(C.bg, C.accent, 0.1 * oa + 0.05 * ha), mix(C.border, C.accent, max(oa, ha * 0.6)), 1, z, 5)
+    local col = mix(C.dim, C.accent, max(oa, ha))
+    for i = 0, 1 do
+        local ox_ = bx + bw / 2 - 3 + i * 5
+        Ln(w, "a" .. i, ox_ - 1.5, cy - 3.5, ox_ + 1.5, cy, col, 1, z + 2, 1.5)
+        Ln(w, "b" .. i, ox_ + 1.5, cy, ox_ - 1.5, cy + 3.5, col, 1, z + 2, 1.5)
+    end
+    if hv and M.pressed then openSubPop(w, bx + bw + 8, cy - 16) end
+end
+
+-- Key pill -----------------------------------------------------------
+function Kinds.keypill.Get(w) return w.value end
+function Kinds.keypill.Set(w, v) w.value = v; if w.callback then w.callback(v) end end
+function Kinds.keypill.draw(w, x, y, wd, z)
+    local cy = y + 13
+    Txt(w, "l", w.label, x, cy, w.dim and C.dim or C.text, 1, z, 12.5, not w.dim)
+    local listening = CAP and CAP.owner == w
+    local txt = listening and "..." or keyName(w.value)
+    local pw = max(34, tw(txt, 12) + 18)
+    if KeyPillCtl(w, "p", x + wd - pw, cy - 11, pw, 22, txt, listening, z) then
+        startCapture(w, function(vk) w:Set(vk) end)
+    end
+end
+
+-- Text entry -----------------------------------------------------------
+function Kinds.entry.Get(w) return w.text end
+function Kinds.entry.Set(w, v) w.text = v end
+function Kinds.entry.draw(w, x, y, wd, z)
+    Txt(w, "l", w.label, x, y + 9, C.text, 1, z, 12.5, true)
+    local fy, fh = y + 20, 28
+    local hv = hot(x, fy, wd, fh)
+    if hv then w.hovFrame = frameId end
+    if hv and M.pressed then focusText(w) end
+    local foc = (TI.owner == w)
+    local fa = ani(w, "f", foc and 1 or 0, 16)
+    local ha = ani(w, "h", hv and 1 or 0, 14)
+    Box2(w, "bx", x, fy, wd, fh, mix(C.bg, C.hover, ha * 0.4), mix(C.border, C.accent, max(fa, ha * 0.3)), 1, z, 6)
+    if w.text == "" and not foc then
+        Txt(w, "ph", w.placeholder or "", x + 10, fy + fh / 2, C.dim, 1, z + 2, 12.5, false)
+    else
+        Txt(w, "tx", w.text, x + 10, fy + fh / 2, C.text, 1, z + 2, 12.5, false)
+    end
+    if foc and floor(tick() * 2) % 2 == 0 then
+        Rect(w, "car", x + 11 + tw(w.text, 12.5), fy + 7, 1, fh - 14, C.text, 1, z + 3, true, 0)
+    end
+end
+
+-- Buttons grid ---------------------------------------------------------
+function Kinds.buttons.draw(w, x, y, wd, z)
+    local gap, rh = 6, 28
+    local colw = (wd - gap) / 2
+    local col, ry, idx = 0, y + 2, 1
+    while idx <= #w.list do
+        local b = w.list[idx]
+        if b.full then
+            if col ~= 0 then col = 0; ry = ry + rh + gap end
+            if Button(w, "b" .. idx, x, ry, wd, rh, b[1], z) and b[2] then b[2]() end
+            ry = ry + rh + gap
+        else
+            if Button(w, "b" .. idx, x + col * (colw + gap), ry, colw, rh, b[1], z) and b[2] then b[2]() end
+            col = col + 1
+            if col == 2 then col = 0; ry = ry + rh + gap end
+        end
+        idx = idx + 1
+    end
+end
+
+-- Theme list -----------------------------------------------------------
+function Kinds.themes.Get(w) return THEMES[w.value].name end
+function Kinds.themes.Set(w, i)
+    w.value = i
+    applyTheme(THEMES[i].name)
+    if w.callback then w.callback(THEMES[i].name) end
+end
+function Kinds.themes.draw(w, x, y, wd, z)
+    Txt(w, "l", "Theme", x, y + 13, C.text, 1, z, 12.5, true)
+    Txt(w, "v", THEMES[w.value].name, x + wd, y + 13, C.text, 1, z, 12.5, true, "r")
+    local ly, lh = y + 30, #THEMES * 22 + 8
+    Box2(w, "lb", x, ly, wd, lh, C.bg, C.border, 1, z, 6)
+    local hy = ani(w, "hy", (w.value - 1) * 22, 16)
+    Rect(w, "hl", x + 3, ly + 4 + hy, wd - 6, 22, C.sel, 1, z + 2, true, 4)
+    Rect(w, "bar", x + 3, ly + 8 + hy, 2.5, 14, C.accent, 1, z + 3, true, 1)
+    for i, t in ipairs(THEMES) do
+        local ry = ly + 4 + (i - 1) * 22
+        local hv = hot(x + 3, ry, wd - 6, 22)
+        local ha = ani(w, "h" .. i, hv and 1 or 0, 14)
+        if hv and M.pressed then w:Set(i) end
+        local sel = (w.value == i)
+        local sa = ani(w, "s" .. i, sel and 1 or 0, 14)
+        if ha > 0.02 and not sel then Rect(w, "hv" .. i, x + 3, ry, wd - 6, 22, C.hover, ha, z + 1, true, 4) end
+        Txt(w, "t" .. i, t.name, x + 14 + 14 * sa, ry + 11, mix(C.dim, C.text, max(sa, ha)), 1, z + 4, 12, sel)
+        if sa > 0.02 then
+            Tri(w, "ar" .. i, x + 13, ry + 7, x + 13, ry + 15, x + 20, ry + 11, C.accent, sa, z + 4)
+        end
+    end
+end
+
+-- Caption --------------------------------------------------------------
+function Kinds.caption.measure(w, wd)
+    w.lines = wrap(w.text, wd, 12)
+    w.h = #w.lines * 16 + 8
+end
+function Kinds.caption.draw(w, x, y, wd, z)
+    for i, l in ipairs(w.lines or {}) do Txt(w, "c" .. i, l, x, y + 8 + (i - 1) * 16, C.dim, 1, z, 12, false) end
+end
+
+--========================================================================
+-- Box / Page API
+--========================================================================
+local BoxAPI = {}
+BoxAPI.__index = BoxAPI
+local function newBox(hub, title, side) return setmetatable({ hub = hub, title = title or "", side = side or "Left", rows = {} }, BoxAPI) end
+local function addRow(box, w)
+    w.box = box; w.hub = box.hub
+    box.rows[#box.rows + 1] = w
+    if w.id and box.hub then box.hub.items[w.id] = w end
+    if w.bindable and box.hub then box.hub.bindList[#box.hub.bindList + 1] = w end
+    return w
+end
+
+function BoxAPI:Switch(id, label, default, opts)
+    opts = opts or {}
+    local w = newItem("switch", { id = id, label = label, value = default or false, dim = opts.dim, bold = opts.bold,
+        callback = opts.callback, h = 26, binds = {}, bindable = (opts.bind or opts.binds) and true or false })
+    if opts.color then w.color = { opts.color.R, opts.color.G, opts.color.B } end
+    for _, b in ipairs(opts.binds or {}) do w.binds[#w.binds + 1] = { vk = b.key or 0, mode = b.mode or "Toggle", show = b.show ~= false, last = false } end
+    return addRow(self, w)
+end
+function BoxAPI:Slider(id, label, mn, mx, default, opts)
+    opts = opts or {}
+    local w = newItem("slider", { id = id, label = label, min = mn, max = mx, value = default or mn, suffix = opts.suffix,
+        dec = opts.dec or 0, step = opts.step or (opts.dec and 10 ^ -opts.dec or 1), zeroText = opts.zeroText, dot = opts.dot,
+        noTrack = opts.noTrack, trackX = opts.trackX, callback = opts.callback, h = 26 })
+    return addRow(self, w)
+end
+function BoxAPI:Choice(id, label, items, default, opts)
+    opts = opts or {}
+    return addRow(self, newItem("choice", { id = id, label = label, items = items, value = default or 1, cw = opts.width or 118,
+        callback = opts.callback, h = 26 }))
+end
+function BoxAPI:Multi(id, label, items, defaults, opts)
+    opts = opts or {}
+    local set = {}
+    for _, n in ipairs(defaults or {}) do set[n] = true end
+    return addRow(self, newItem("multi", { id = id, label = label, items = items, set = set, multi = true,
+        cw = opts.width or 118, callback = opts.callback, h = 26 }))
+end
+function BoxAPI:Popover(label, title, width)
+    local w = newItem("popover", { label = label, title = title or label, pw = width or 200, h = 26 })
+    w.sub = newBox(self.hub, title or label)
+    addRow(self, w)
+    return w.sub
+end
+function BoxAPI:KeyPill(id, label, default, opts)
+    opts = opts or {}
+    return addRow(self, newItem("keypill", { id = id, label = label, value = default or 0, dim = opts.dim, callback = opts.callback, h = 26 }))
+end
+function BoxAPI:Entry(id, label, placeholder, opts)
+    local w = newItem("entry", { id = id, label = label, placeholder = placeholder, text = "", h = 52 })
+    return addRow(self, w)
+end
+function BoxAPI:Buttons(list)
+    local rows, col = 0, 0
+    for _, b in ipairs(list) do
+        if b.full then if col ~= 0 then rows = rows + 1; col = 0 end rows = rows + 1
+        else col = col + 1 if col == 2 then rows = rows + 1; col = 0 end end
+    end
+    if col ~= 0 then rows = rows + 1 end
+    return addRow(self, newItem("buttons", { list = list, h = rows * 34 + 2 }))
+end
+function BoxAPI:ThemeList(id, callback)
+    local idx = 1
+    for i, t in ipairs(THEMES) do if t.name == "Oxocarbon" then idx = i end end
+    return addRow(self, newItem("themes", { id = id, value = idx, callback = callback, h = 30 + #THEMES * 22 + 14 }))
+end
+function BoxAPI:Caption(text) return addRow(self, newItem("caption", { text = text, h = 24 })) end
+
+local PageAPI = {}
+PageAPI.__index = PageAPI
+function PageAPI:Box(title, side)
+    local b = newBox(self.hub, title, side)
+    self.boxes[#self.boxes + 1] = b
+    return b
+end
+
+--========================================================================
+-- Hub
+--========================================================================
+local Lime = {}
+Lime.__index = Lime
+
+function Lime:Get(id) local it = self.items[id]; if it then return it:Get() end end
+function Lime:Set(id, v) local it = self.items[id]; if it then it:Set(v) end end
+
+function Lime:Page(name, opts)
+    opts = opts or {}
+    local p = setmetatable({ hub = self, name = name, icon = opts.icon, boxes = {}, children = {} }, PageAPI)
+    if opts.parent then
+        for _, pp in ipairs(self.pages) do
+            if pp.name == opts.parent then p.parent = pp; pp.children[#pp.children + 1] = p end
+        end
+    else
+        local cat
+        for _, c in ipairs(self.cats) do if c.name == opts.category then cat = c end end
+        if not cat then cat = { name = opts.category or "Other", pages = {} }; self.cats[#self.cats + 1] = cat end
+        cat.pages[#cat.pages + 1] = p
+    end
+    self.pages[#self.pages + 1] = p
     return p
 end
 
-function Window:_prec(p, class, props, ox, oy)
-    return self:_rec(p.recs, class, props, ox, oy, p.org)
-end
-
-function Window:_phit(p, h)
-    h.org = p.org
-    p.hits[#p.hits + 1] = h
-    return h
-end
-
-function Window:_closePopup()
-    local p = self.popup
+function Lime:Select(p)
     if not p then return end
-    self.popup = nil
-    self.cap = nil
-    if self.hover and self.hoverPop then self.hover = nil end
-    self:_removeList(p.recs)
-    if p.onClose then p.onClose() end
-end
-
-----------------------------------------------------------------------
--- Window
-----------------------------------------------------------------------
-function Lib:CreateWindow(opts)
-    opts = opts or {}
-    local view = viewSize()
-    local win = setmetatable({
-        title = opts.Title or "ProjectFuzz | v1.0",
-        w = opts.Width or 725, h = opts.Height or 628,
-        visible = true, tabs = {}, active = nil, chrome = {}, hits = {}, keybinds = {},
-        ver = 0, toggleKey = opts.ToggleKey or 161, syncDirty = true,
-    }, Window)
-    win.x = opts.X or floor((view.X - win.w) / 2)
-    win.y = opts.Y or floor((view.Y - win.h) / 2)
-    win.colW = floor((win.w - PAD * 2 - GAP) / 2)
-
-    local C = win.chrome
-    win:_rec(C, "Square", { Filled = true, Color = T.Background, Size = V2(win.w, win.h), ZIndex = 1 }, 0, 0)
-    win:_rec(C, "Square", { Filled = false, Thickness = 1, Color = Color3.fromRGB(0, 0, 0), Size = V2(win.w + 2, win.h + 2), ZIndex = 2 }, -1, -1)
-    win.outlineRec = win:_rec(C, "Square", { Filled = false, Thickness = 1, Color = outlineCol(), Size = V2(win.w, win.h), ZIndex = 2 }, 0, 0)
-    win:_rec(C, "Square", { Filled = false, Thickness = 1, Color = T.Inner, Size = V2(win.w - 4, win.h - 4), ZIndex = 2 }, 2, 2)
-    -- inner frame: the whole content area under the tabs is its own bordered panel; the boxes sit inside it
-    local fy = TABBAR_Y + TABBAR_H + 1
-    win:_rec(C, "Square", { Filled = true, Color = T.Frame, Size = V2(win.w - TPAD * 2, win.h - fy - TPAD), ZIndex = 2 }, TPAD, fy)
-    win:_rec(C, "Square", { Filled = false, Thickness = 1, Color = T.Border, Size = V2(win.w - TPAD * 2, win.h - fy - TPAD), ZIndex = 3 }, TPAD, fy)
-    gradBar(function(c, p, ox, oy) return win:_rec(C, c, p, ox + 1, oy) end, win.w - 2, 1, 40, 3)
-    win.titleRec = win:_rec(C, "Text", { Text = U(win.title), Color = T.Text, Font = FONT, Size = 12, ZIndex = 3 }, 8, 5)
-    local closeRec = win:_rec(C, "Text", { Text = "X", Color = T.TextDim, Font = FONT, Size = 12, ZIndex = 3 }, win.w - 16, 5)
-    win:_rec(C, "Square", { Filled = true, Color = T.Border, Size = V2(win.w - 2, 1), ZIndex = 3 }, 1, TITLE_H)
-
-    -- dragging by the title bar
-    win:_hit({ ox = 0, oy = 0, w = win.w - 24, h = TITLE_H,
-        onDown = function(mx, my) win:_closePopup() win.dx, win.dy = mx - win.x, my - win.y end,
-        onDrag = function(mx, my)
-            local v = viewSize()
-            local nx = clamp(mx - win.dx, 0, v.X - win.w)
-            local ny = clamp(my - win.dy, 0, v.Y - win.h)
-            if nx ~= win.x or ny ~= win.y then
-                win.x, win.y = nx, ny
-                win.ver = win.ver + 1
-                win:_placeList(win.chrome)
-                if win.active then win:_placeList(win.active.recs) win.active.placedVer = win.ver end
-            end
-        end })
-    win:_hit({ ox = win.w - 22, oy = 0, w = 22, h = TITLE_H,
-        onDown = function() win:SetVisible(false) end,
-        onHover = function(b) closeRec.d.Color = b and T.Accent or T.TextDim end })
-
-    Lib.Windows[#Lib.Windows + 1] = win
-    return win
-end
-
-function Window:SetVisible(v)
-    self.visible = v and true or false
-    if not self.visible then self:_closePopup() end
-    for i = 1, #self.tabs do self:_refresh(self.tabs[i].recs) end
-    local a = self.active
-    if self.visible and a and a.placedVer ~= self.ver then a.dirty = true end
-    self:_sync()
-end
-
-function Window:Toggle() self:SetVisible(not self.visible) end
-
-function Window:SetTitle(t)
-    self.titleRec.d.Text = U(t)
-end
-
-function Window:_layoutTabs()
-    local n = #self.tabs
-    local bw = (self.w - TPAD * 2 - 2 * (n - 1)) / n
-    for i = 1, n do
-        local t = self.tabs[i]
-        local x = TPAD + (i - 1) * (bw + 2)
-        t.btn.bg.ox, t.btn.bd.ox, t.btn.txt.ox = x, x, x + bw / 2
-        t.btn.bg.d.Size, t.btn.bd.d.Size = V2(bw, TABBAR_H), V2(bw, TABBAR_H)
-        t.btn.hit.ox, t.btn.hit.w = x, bw
-        self:_put(t.btn.bg) self:_put(t.btn.bd) self:_put(t.btn.txt)
+    if #p.children > 0 then p = p.children[1] end
+    if self.active ~= p then
+        self.active = p
+        self.clock = 0
+        self.scrollT = 0
+        if self.__a then self.__a.scroll = 0 end
+        closePop()
     end
 end
 
-function Window:_styleTabs()
-    for i = 1, #self.tabs do
-        local t = self.tabs[i]
-        local on = (t == self.active)
-        t.btn.bg.d.Color = on and T.TabActive or T.Panel
-        t.btn.txt.d.Color = on and T.White or T.Text
+function Lime:Toast(o)
+    local t = { title = o.Title or "", text = o.Text or "", icon = o.Icon, born = tick(), total = o.Total, cur = o.Current or 0 }
+    t.dur = (not o.Total) and (o.Duration or 3) or nil
+    function t:Set(v) self.cur = v end
+    function t:Close() self.closing = true end
+    table.insert(self.toasts, t)
+    return t
+end
+
+function Lime:Destroy()
+    self.dead = true
+    if self.conn then self.conn:Disconnect(); self.conn = nil end
+    for i = 1, #pool do pcall(function() pool[i].obj:Remove() end) end
+    pool = {}
+    if _G.__PlaceholderHub == self then _G.__PlaceholderHub = nil end
+end
+
+--========================================================================
+-- Frame drawing
+--========================================================================
+local function drawBox(box, x, y, wd, z)
+    Txt(box, "title", string.upper(box.title), x + 2, y + 8, C.dim, 1, z, 10.5, true)
+    local bh = 16
+    for _, r in ipairs(box.rows) do
+        if r.measure then r:measure(wd - 20) end
+        bh = bh + r.h
     end
-end
-
-function Window:SetTab(tab)
-    if self.active == tab then return end
-    self:_closePopup()
-    local old = self.active
-    self.active = tab
-    self:_styleTabs()
-    if tab.placedVer ~= self.ver then tab.dirty = true end
-    if tab.dirty then tab:_reflow() end
-    if old then self:_refresh(old.recs) end
-    self:_sync()
-end
-
-function Window:AddTab(name)
-    local tab = setmetatable({ win = self, name = name, recs = {}, boxes = { Left = {}, Right = {} }, dirty = true, placedVer = -1 }, Tab)
-    self.tabs[#self.tabs + 1] = tab
-    local C = self.chrome
-    tab.btn = {
-        bg = self:_rec(C, "Square", { Filled = true, Color = T.Panel, Size = V2(10, TABBAR_H), ZIndex = 3 }, 0, TABBAR_Y),
-        bd = self:_rec(C, "Square", { Filled = false, Thickness = 1, Color = T.Border, Size = V2(10, TABBAR_H), ZIndex = 4 }, 0, TABBAR_Y),
-        txt = self:_rec(C, "Text", { Text = U(name), Color = T.TextDim, Font = FONT, Size = 12, Center = true, ZIndex = 5 }, 0, TABBAR_Y + TABBAR_H / 2),
-    }
-    tab.btn.hit = self:_hit({ ox = 0, oy = TABBAR_Y, w = 10, h = TABBAR_H,
-        onDown = function() self:SetTab(tab) end,
-        onHover = function(b) if self.active ~= tab then tab.btn.txt.d.Color = b and T.White or T.Text end end })
-    self:_layoutTabs()
-    if not self.active then
-        self.active = tab
-        tab.dirty = true
+    Box2(box, "bg", x, y + 18, wd, bh, C.group, C.border, 1, z, 7)
+    local cy = y + 18 + 8
+    for _, r in ipairs(box.rows) do
+        r:draw(x + 10, cy, wd - 20, z + 4)
+        cy = cy + r.h
     end
-    self:_styleTabs()
-    return tab
+    return 18 + bh + 10
 end
 
-function Window:Destroy()
-    self:_closePopup()
-    self:_removeList(self.chrome)
-    for i = 1, #self.tabs do self:_removeList(self.tabs[i].recs) end
-    for i = #Lib.Windows, 1, -1 do if Lib.Windows[i] == self then table.remove(Lib.Windows, i) end end
-end
-
-----------------------------------------------------------------------
--- Tab: two columns of boxes (sections / tabboxes)
-----------------------------------------------------------------------
-function Tab:_newBox(side, h)
-    side = (side == "Right") and "Right" or "Left"
-    local box = { tab = self, side = side, x = 0, y = 0, w = self.win.colW, h = h or 30 }
-    local col = self.boxes[side]
-    col[#col + 1] = box
-    self.dirty = true
-    return box
-end
-
-function Tab:_brec(box, class, props, ox, oy)
-    return self.win:_rec(self.recs, class, props, ox, oy, box, self, nil)
-end
-
-function Tab:_reflow()
-    local win = self.win
-    for side, col in pairs(self.boxes) do
-        local y = CONTENT_Y
-        for i = 1, #col do
-            local b = col[i]
-            b.x = (side == "Left") and PAD or (PAD + win.colW + GAP)
-            b.y = y
-            if b.sz ~= b.h then
-                b.sz = b.h
-                b.bg.d.Size = V2(b.w, b.h)
-                b.bd.d.Size = V2(b.w, b.h)
-                if b.bd2 then b.bd2.d.Size = V2(b.w - 2, b.h - 2) end
-            end
-            y = y + b.h + GAP
-        end
-    end
-    win:_placeList(self.recs)
-    self.placedVer = win.ver
-    self.dirty = false
-end
-
-local function newSection(tab, box, cy, sub)
-    return setmetatable({ win = tab.win, tab = tab, box = box, cy = cy, sub = sub, folds = {} }, Section)
-end
-
-function Section:isActive()
-    local b = self.box
-    return b.activeSub == nil or b.activeSub == self
-end
-
-function Tab:AddSection(title, side)
-    local box = self:_newBox(side, 36)
-    box.bg = self:_brec(box, "Square", { Filled = true, Color = T.Panel, Size = V2(box.w, 36), ZIndex = 2 }, 0, 0)
-    box.bd = self:_brec(box, "Square", { Filled = false, Thickness = 1, Color = T.Border, Size = V2(box.w, 36), ZIndex = 3 }, 0, 0)
-    box.bd2 = self:_brec(box, "Square", { Filled = false, Thickness = 1, Color = T.Inner, Size = V2(box.w - 2, 34), ZIndex = 3 }, 1, 1)
-    gradBar(function(c, p, ox, oy) return self:_brec(box, c, p, ox, oy) end, box.w, 0, 20, 4)
-    self:_brec(box, "Text", { Text = U(title or ""), Color = T.Text, Font = FONT, Size = 12, ZIndex = 5 }, 8, 3)
-    return newSection(self, box, 17, false)
-end
-
-function Tab:AddTabbox(side)
-    local win = self.win
-    local box = self:_newBox(side, 38)
-    box.subs = {}
-    box.bg = self:_brec(box, "Square", { Filled = true, Color = T.Panel, Size = V2(box.w, 38), ZIndex = 2 }, 0, 0)
-    box.bd = self:_brec(box, "Square", { Filled = false, Thickness = 1, Color = T.Border, Size = V2(box.w, 38), ZIndex = 3 }, 0, 0)
-    box.bd2 = self:_brec(box, "Square", { Filled = false, Thickness = 1, Color = T.Inner, Size = V2(box.w - 2, 36), ZIndex = 3 }, 1, 1)
-    gradBar(function(c, p, ox, oy) return self:_brec(box, c, p, ox, oy) end, box.w, 0, 20, 4)
-    self:_brec(box, "Square", { Filled = true, Color = T.Border, Size = V2(box.w, 1), ZIndex = 4 }, 0, 20)
-    local tb = { box = box }
-
-    local function style()
-        for i = 1, #box.subs do
-            local s = box.subs[i]
-            local on = (box.activeSub == s)
-            s.hdrTxt.d.Color = on and T.Accent or T.Text
-            s.hdrLine.hidden = not on
-        end
-        win:_sync()
-    end
-
-    function tb:AddTab(name)
-        local sec = newSection(self.box.tab, box, 21, true)
-        box.subs[#box.subs + 1] = sec
-        sec.hdrTxt = self.box.tab:_brec(box, "Text", { Text = U(name), Color = T.TextDim, Font = FONT, Size = 12, Center = true, ZIndex = 5 }, 0, 10)
-        sec.hdrLine = self.box.tab:_brec(box, "Square", { Filled = true, Color = T.Accent, Size = V2(10, 2), ZIndex = 5 }, 0, 19)
-        sec.hdrLine.hidden = true
-        sec.hdrHit = win:_hit({ ox = 0, oy = 2, w = 10, h = 18, org = box, tab = box.tab,
-            onDown = function() box.activeSub = sec style() end,
-            onHover = function(b) if box.activeSub ~= sec then sec.hdrTxt.d.Color = b and T.White or T.Text end end })
-        if not box.activeSub then box.activeSub = sec end
-        local n = #box.subs
-        local sw = box.w / n
-        for i = 1, n do
-            local s = box.subs[i]
-            s.hdrTxt.ox = (i - 0.5) * sw
-            s.hdrLine.ox = (i - 1) * sw + 6
-            s.hdrLine.d.Size = V2(sw - 12, 2)
-            s.hdrHit.ox, s.hdrHit.w = (i - 1) * sw, sw
-        end
-        box.tab.dirty = true
-        style()
-        return sec
-    end
-    return tb
-end
-
-----------------------------------------------------------------------
--- Section helpers
-----------------------------------------------------------------------
--- where the section's content ends (rows inside a closed fold take no space)
-function Section:_end()
-    local e = self.cy
-    local fl = self.folds
-    for i = 1, #fl do
-        if not fl[i].open then e = e - fl[i].h end
-    end
-    return e
-end
-
-function Section:_resize()
-    local box = self.box
-    if box.subs then
-        local m = 0
-        for i = 1, #box.subs do
-            local e = box.subs[i]:_end()
-            if e > m then m = e end
-        end
-        box.h = m + 10
-    else
-        box.h = self:_end() + 10
-    end
-    self.tab.dirty = true
-end
-
-function Section:_grow(h)
-    local y = self.cy
-    self.cy = y + h
-    local f = self.fold
-    if f then f.h = f.h + h end
-    self:_resize()
-    return y
-end
-
--- FOLD: a group of rows that can be shown / hidden (the box shrinks and grows with it).
---   local f = sec:BeginFold(false)   -- false = starts closed
---   sec:AddColorPicker(...)          -- everything added until EndFold belongs to the fold
---   sec:EndFold()
---   sec:SetFold(f, true)             -- open / close it (e.g. from a toggle's callback)
--- A fold must be the LAST thing in its section (rows below it would not move up when it closes).
-function Section:BeginFold(open)
-    local f = { open = (open == true), h = 0 }
-    self.fold = f
-    self.folds[#self.folds + 1] = f
-    return f
-end
-
-function Section:EndFold()
-    self.fold = nil
-end
-
-function Section:SetFold(f, open)
-    open = (open == true)
-    if not f or f.open == open then return end
-    f.open = open
-    self.win:_closePopup()
-    self:_resize()
-    self.win.syncDirty = true
-end
-
-function Section:_r(class, props, ox, oy)
-    local r = self.win:_rec(self.tab.recs, class, props, ox, oy, self.box, self.tab, self)
-    r.fold = self.fold
-    return r
-end
-
-function Section:_h(h)
-    h.org, h.tab, h.sec, h.fold = self.box, self.tab, self, self.fold
-    return self.win:_hit(h)
-end
-
--- left indent for rows that live inside a fold
-function Section:_ind() return self.fold and FOLD_IND or 0 end
-
-function Section:AddSpacing(n) self:_grow(n or 8) end
-
-function Section:AddLabel(text)
-    local ind = self:_ind()
-    local y = self:_grow(16)
-    local r = self:_r("Text", { Text = U(text), Color = T.TextDim, Font = FONT, Size = 12, ZIndex = 5 }, 8 + ind, y + 2)
-    local obj = {}
-    function obj:Set(t) r.d.Text = U(t) end
-    return obj
-end
-
-----------------------------------------------------------------------
--- Keybind (also usable as a toggle addon)
-----------------------------------------------------------------------
-function Section:_keybindAt(id, y, rx, default, mode, cb)
-    local win = self.win
-    local kb = { id = id, type = "Keybind", key = default or 0, mode = mode or "Toggle", cb = cb }
-    kb.state = (kb.mode == "Always")
-    -- the box is as wide as its text (min 26px), like the concept: [C] [NONE] [CAPS]
-    local function kw() return max(26, #keyName(kb.key) * 6 + 10) end
-    local kwid = kw()
-    local x = rx - kwid
-    local bgR = self:_r("Square", { Filled = true, Color = T.Box, Size = V2(kwid, 13), ZIndex = 5 }, x, y + 2)
-    local bd = self:_r("Square", { Filled = false, Thickness = 1, Color = T.Border, Size = V2(kwid, 13), ZIndex = 6 }, x, y + 2)
-    kb.txt = self:_r("Text", { Text = keyName(kb.key), Color = T.Text, Font = FONT, Size = 10, Center = true, ZIndex = 7 }, x + kwid / 2, y + 8)
-    local hit
-
-    function kb:Set(key)
-        self.key = key or 0
-        self.txt.d.Text = keyName(self.key)
-        self.txt.d.Color = T.Text
-        local w = kw()
-        if w ~= kwid and hit then
-            kwid = w
-            local nx = rx - w
-            bgR.ox, bd.ox, hit.ox, hit.w = nx, nx, nx, w
-            self.txt.ox = nx + w / 2
-            bgR.d.Size, bd.d.Size = V2(w, 13), V2(w, 13)
-            win:_put(bgR) win:_put(bd) win:_put(self.txt)
-        end
-        Lib.Flags[id or ""] = self.state
-    end
-    function kb:Get() return self.state end
-    function kb:IsActive() return self.state end
-    function kb:Export() return { self.key, self.mode } end
-    function kb:Import(v) if type(v) == "table" then self.mode = v[2] or self.mode self:Set(v[1]) end end
-
-    hit = self:_h({ ox = x, oy = y + 2, w = kwid, h = 13,
-        onDown = function()
-            win.listening = kb
-            win.listenAt = tick()
-            kb.txt.d.Text = "..."
-            kb.txt.d.Color = T.Accent
-        end,
-        onHover = function(b) bd.d.Color = b and T.Accent or T.Border end })
-
-    win.keybinds[#win.keybinds + 1] = kb
-    reg(id, kb, kb.state)
-    return kb, x - 6
-end
-
-function Section:AddKeybind(id, label, default, mode, cb)
-    local ind = self:_ind()
-    local y = self:_grow(18)
-    self:_r("Text", { Text = U(label), Color = T.Text, Font = FONT, Size = 12, ZIndex = 5 }, 8 + ind, y + 3)
-    local kb = self:_keybindAt(id, y, self.box.w - 8, default, mode, cb)
-    return kb
-end
-
-----------------------------------------------------------------------
--- Colour picker (also usable as a toggle addon)
-----------------------------------------------------------------------
-function Section:_colorAt(id, y, rx, default, cb)
-    local win = self.win
-    local cp = { id = id, type = "Color", value = default or T.White, cb = cb }
-    local x = rx - 22
-    local sw = self:_r("Square", { Filled = true, Color = cp.value, Size = V2(22, 10), ZIndex = 5 }, x, y + 4)
-    local bd = self:_r("Square", { Filled = false, Thickness = 1, Color = T.Border, Size = V2(22, 10), ZIndex = 6 }, x, y + 4)
-
-    function cp:Set(c, silent)
-        self.value = c
-        sw.d.Color = c
-        Lib.Flags[id or ""] = c
-        if self.cb and not silent then pcall(self.cb, c) end
-    end
-    function cp:Get() return self.value end
-    function cp:Export() return { self.value.R, self.value.G, self.value.B } end
-    function cp:Import(v) if type(v) == "table" and v[1] then self:Set(Color3.new(v[1], v[2], v[3])) end end
-
-    self:_h({ ox = x, oy = y + 4, w = 22, h = 10,
-        onDown = function(_, _, h)
-            local ax, ay = h.ax - win.x, h.ay - win.y
-            local pw, ph = 160, 94
-            local py = ay + 16
-            if py + ph > win.h - 2 then py = ay - ph - 4 end
-            local p = win:_openPopup(ax - pw + 22, py, pw, ph)
-            local prev = win:_prec(p, "Square", { Filled = true, Color = cp.value, Size = V2(pw - 12, 14), ZIndex = 32 }, 6, 6)
-            local chans = { "R", "G", "B" }
-            local vals = { floor(cp.value.R * 255 + 0.5), floor(cp.value.G * 255 + 0.5), floor(cp.value.B * 255 + 0.5) }
-            local fills, txts = {}, {}
-            local BW = 100
-            local function apply()
-                local c = Color3.fromRGB(vals[1], vals[2], vals[3])
-                prev.d.Color = c
-                cp:Set(c)
-                for i = 1, 3 do
-                    fills[i].d.Size = V2(max(vals[i] / 255 * BW, 1), 10)
-                    txts[i].d.Text = tostring(vals[i])
+local function searchBoxes(hub)
+    if hub.sq == hub.query and hub.sres then return hub.sres end
+    hub.sq = hub.query
+    local q, out = hub.query:lower(), {}
+    for _, p in ipairs(hub.pages) do
+        if #p.children == 0 then
+            for _, box in ipairs(p.boxes) do
+                local rows = {}
+                for _, r in ipairs(box.rows) do
+                    if r.label and r.label:lower():find(q, 1, true) then rows[#rows + 1] = r end
+                end
+                if #rows > 0 then
+                    local px_ = box.proxy
+                    if not px_ then px_ = { hub = hub, side = "auto" }; box.proxy = px_ end
+                    px_.title = p.name .. " / " .. box.title
+                    px_.rows = rows
+                    out[#out + 1] = px_
                 end
             end
-            for i = 1, 3 do
-                local ry = 28 + (i - 1) * 20
-                win:_prec(p, "Text", { Text = chans[i], Color = T.TextDim, Font = FONT, Size = 12, ZIndex = 32 }, 6, ry - 1)
-                win:_prec(p, "Square", { Filled = true, Color = T.Box, Size = V2(BW, 10), ZIndex = 32 }, 22, ry)
-                fills[i] = win:_prec(p, "Square", { Filled = true, Color = T.Accent, Size = V2(max(vals[i] / 255 * BW, 1), 10), ZIndex = 33 }, 22, ry)
-                win:_prec(p, "Square", { Filled = false, Thickness = 1, Color = T.Border, Size = V2(BW, 10), ZIndex = 34 }, 22, ry)
-                txts[i] = win:_prec(p, "Text", { Text = tostring(vals[i]), Color = T.Text, Font = FONT, Size = 12, ZIndex = 33 }, 128, ry - 1)
-                local function setFrom(mx, _, hh)
-                    vals[i] = floor(clamp((mx - hh.ax) / BW, 0, 1) * 255 + 0.5)
-                    apply()
-                end
-                win:_phit(p, { ox = 22, oy = ry - 2, w = BW, h = 14, onDown = setFrom, onDrag = setFrom })
-            end
-        end,
-        onHover = function(b) bd.d.Color = b and T.Accent or T.Border end })
-
-    reg(id, cp, cp.value)
-    return cp, x - 6
+        end
+    end
+    hub.sres = out
+    hub.clock = 0
+    return out
 end
 
-function Section:AddColorPicker(id, label, default, cb)
-    local ind = self:_ind()
-    local y = self:_grow(18)
-    self:_r("Text", { Text = U(label), Color = T.Text, Font = FONT, Size = 12, ZIndex = 5 }, 8 + ind, y + 3)
-    local cp = self:_colorAt(id, y, self.box.w - 8, default, cb)
-    return cp
+local function sideRow(hub, p, y, h, alpha, child)
+    local hv = hot(8, y, SW - 16, h)
+    if hv and M.pressed and alpha > 0.5 then hub:Select(p) end
+    local ha = ani(p, "hv", hv and 1 or 0, 14)
+    local act = (hub.active == p) or (hub.active and hub.active.parent == p)
+    local ia = ani(p, "act", act and 1 or 0, 14)
+    local tcol = mix(mix(C.dim, C.text, ha * 0.7), C.text, ia)
+    local ix = child and 36 or 26
+    Icon(p, "i", p.icon or "file", ix, y + h / 2, child and 14 or 16, tcol, alpha, 17)
+    Txt(p, "t", p.name, ix + 16, y + h / 2, tcol, alpha, 17, 13, true)
 end
 
-----------------------------------------------------------------------
--- Toggle
-----------------------------------------------------------------------
-function Section:AddToggle(id, label, default, cb)
-    local win = self.win
-    local ind = self:_ind()
-    local y = self:_grow(18)
-    local obj = { id = id, type = "Toggle", value = (default == true), cb = cb, rx = self.box.w - 8 }
-    local frame = self:_r("Square", { Filled = true, Color = T.Box, Size = V2(12, 12), ZIndex = 5 }, 8 + ind, y + 3)
-    local bd = self:_r("Square", { Filled = false, Thickness = 1, Color = T.Border, Size = V2(12, 12), ZIndex = 6 }, 8 + ind, y + 3)
-    local fill = self:_r("Square", { Filled = true, Color = T.Accent, Size = V2(8, 8), ZIndex = 7 }, 10 + ind, y + 5)
-    local lbl = self:_r("Text", { Text = U(label), Color = T.Text, Font = FONT, Size = 12, ZIndex = 6 }, 26 + ind, y + 3)
-    fill.hidden = not obj.value
-
-    function obj:Set(v, silent)
-        v = (v == true)
-        if v == self.value and fill.hidden == (not v) then return end
-        self.value = v
-        fill.hidden = not v
-        Lib.Flags[id or ""] = v
-        win:_sync()
-        if self.cb and not silent then pcall(self.cb, v) end
-    end
-    function obj:Get() return self.value end
-    function obj:Export() return self.value end
-    function obj:Import(v) if type(v) == "boolean" then self:Set(v) end end
-    -- addons belong to the same fold as the toggle they sit on
-    function obj:AddKeybind(kid, default, mode, kcb)
-        local s = self.sec
-        local prev = s.fold
-        s.fold = self.fold
-        local kb, nrx = s:_keybindAt(kid, self.y, self.rx, default, mode, kcb)
-        s.fold = prev
-        self.rx = nrx
-        return kb
-    end
-    function obj:AddColorPicker(cid, color, ccb)
-        local s = self.sec
-        local prev = s.fold
-        s.fold = self.fold
-        local cp, nrx = s:_colorAt(cid, self.y, self.rx, color, ccb)
-        s.fold = prev
-        self.rx = nrx
-        return cp
-    end
-    obj.sec, obj.y, obj.fold = self, y, self.fold
-
-    self:_h({ ox = 0, oy = y, w = self.box.w, h = 18,
-        onDown = function() obj:Set(not obj.value) end,
-        onHover = function(b) lbl.d.Color = b and T.White or T.Text bd.d.Color = b and T.Accent or T.Border end })
-
-    reg(id, obj, obj.value)
-    return obj
-end
-
-----------------------------------------------------------------------
--- Slider
-----------------------------------------------------------------------
-function Section:AddSlider(id, label, lo, hi, default, opts)
-    opts = opts or {}
-    local win = self.win
-    local ind = self:_ind()
-    local bw = self.box.w - 16 - ind
-    local y = self:_grow(32)
-    local dec = opts.Decimals or 0
-    local suffix = opts.Suffix or ""
-    local obj = { id = id, type = "Slider", min = lo, max = hi, cb = opts.Callback }
-    obj.value = clamp(default or lo, lo, hi)
-
-    self:_r("Text", { Text = U(label), Color = T.Text, Font = FONT, Size = 12, ZIndex = 5 }, 8 + ind, y + 1)
-    self:_r("Square", { Filled = true, Color = T.Box, Size = V2(bw, 12), ZIndex = 5 }, 8 + ind, y + 16)
-    local SEG = 24
-    local segs, segW = {}, bw / SEG
-    for i = 1, SEG do
-        segs[i] = self:_r("Square", { Filled = true, Color = gradAt((i - 0.5) / SEG), Size = V2(segW + 1, 12), ZIndex = 6 }, 8 + ind + (i - 1) * segW, y + 16)
-        segs[i].hidden = true
-        segs[i].gt = (i - 0.5) / SEG
-    end
-    local bd = self:_r("Square", { Filled = false, Thickness = 1, Color = T.Border, Size = V2(bw, 12), ZIndex = 7 }, 8 + ind, y + 16)
-    local txt = self:_r("Text", { Text = "", Color = T.White, Font = FONT, Size = 12, Center = true, ZIndex = 8 }, 8 + ind + bw / 2, y + 22)
-
-    local fmt = "%." .. dec .. "f"
-    local function show()
-        local s = string.format(fmt, obj.value) .. suffix
-        if opts.ShowMax then s = s .. "/" .. string.format(fmt, hi) .. suffix end
-        txt.d.Text = U(s)
-        local w = (obj.value - lo) / max(hi - lo, 1e-9) * bw
-        for i = 1, SEG do
-            local sx = (i - 1) * segW
-            local seg = segs[i]
-            if w > sx + 0.5 then
-                seg.hidden = false
-                seg.d.Size = V2(min(segW + 1, w - sx), 12)
+local function drawSidebar(hub)
+    local y, ty, th = 66, nil, nil
+    for ci, cat in ipairs(hub.cats) do
+        if ci > 1 then y = y + 8 end
+        Txt(hub, "cat" .. ci, string.upper(cat.name), 18, y + 8, C.dim, 1, 16, 10, true)
+        y = y + 22
+        for _, p in ipairs(cat.pages) do
+            if #p.children == 0 then
+                sideRow(hub, p, y, 30, 1, false)
+                if hub.active == p then ty, th = y, 30 end
+                y = y + 32
             else
-                seg.hidden = true
+                local inside = hub.active and hub.active.parent == p
+                local e = ani(p, "exp", inside and 1 or 0, 12)
+                sideRow(hub, p, y, 30, 1, false)
+                y = y + 32
+                for _, c in ipairs(p.children) do
+                    if e > 0.03 then sideRow(hub, c, y, 26, e, true) end
+                    if hub.active == c then ty, th = y, 26 end
+                    y = y + 28 * e
+                end
             end
         end
-        win:_sync()
     end
-    show()
-
-    function obj:Set(v, silent)
-        local m = 10 ^ dec
-        v = floor(clamp(v, lo, hi) * m + 0.5) / m
-        if v == self.value and txt.d.Text ~= "" then return end
-        self.value = v
-        Lib.Flags[id or ""] = v
-        show()
-        if self.cb and not silent then pcall(self.cb, v) end
+    if ty then
+        local hy = ani(hub, "hy", ty, 16)
+        local hh = ani(hub, "hh", th, 16)
+        Box2(hub, "hl", 8, hy, SW - 16, hh, mix(C.side, C.text, 0.07), mix(C.side, C.text, 0.15), 1, 14, 7)
     end
-    function obj:Get() return self.value end
-    function obj:Export() return self.value end
-    function obj:Import(v) if type(v) == "number" then self:Set(v) end end
-
-    local function fromMouse(mx, _, h)
-        obj:Set(lo + (hi - lo) * clamp((mx - h.ax) / bw, 0, 1))
-    end
-    self:_h({ ox = 8 + ind, oy = y + 14, w = bw, h = 16, onDown = fromMouse, onDrag = fromMouse,
-        onHover = function(b) bd.d.Color = b and T.Accent or T.Border end })
-
-    reg(id, obj, obj.value)
-    return obj
 end
 
-----------------------------------------------------------------------
--- Dropdown (single or multi select)
-----------------------------------------------------------------------
-function Section:AddDropdown(id, label, options, default, cb, multi)
-    local win = self.win
-    local ind = self:_ind()
-    local bw = self.box.w - 16 - ind
-    local dy = (label ~= nil and label ~= "") and 18 or 0
-    local y = self:_grow(dy + 20)
-    local obj = { id = id, type = "Dropdown", options = options, multi = (multi == true), cb = cb }
-    if obj.multi then
-        obj.value = {}
-        if type(default) == "table" then for _, v in ipairs(default) do obj.value[v] = true end end
+local function drawContent(hub)
+    local x0, cw = SW + 16, W - SW - 32
+    local colw = (cw - 14) / 2
+    local y0, y1 = HDR + 10, H - 12
+    hub.clock = hub.clock + DT
+    local boxes
+    local searching = hub.query ~= ""
+    if searching then boxes = searchBoxes(hub) else boxes = hub.active and hub.active.boxes or {} end
+    hub.scroll = ani(hub, "scroll", hub.scrollT, 16)
+    local cy = { Left = 0, Right = 0 }
+    CLIP0, CLIP1 = y0, y1
+    for idx, box in ipairs(boxes) do
+        local side = box.side
+        if side == "auto" then side = (cy.Left <= cy.Right) and "Left" or "Right" end
+        local bx = x0 + ((side == "Right") and (colw + 14) or 0)
+        local e = clamp((hub.clock - (idx - 1) * 0.05) / 0.3, 0, 1)
+        e = 1 - (1 - e) ^ 3
+        local save = GA
+        GA = GA * e
+        local h = drawBox(box, bx, y0 - hub.scroll + cy[side] + (1 - e) * 10, colw, 20)
+        GA = save
+        cy[side] = cy[side] + h
+    end
+    if searching and #boxes == 0 then
+        Txt(hub, "nores", "No results", x0 + cw / 2, y0 + 60, C.dim, 1, 20, 13, true, "c")
+    end
+    CLIP0, CLIP1 = nil, nil
+    local total = max(cy.Left, cy.Right)
+    local viewH = y1 - y0
+    hub.maxScroll = max(0, total - viewH)
+    hub.scrollT = clamp(hub.scrollT, 0, hub.maxScroll)
+    if hub.maxScroll > 1 then
+        local thumbH = max(24, viewH * viewH / (viewH + hub.maxScroll))
+        local f = hub.maxScroll > 0 and (hub.scroll / hub.maxScroll) or 0
+        local ty = y0 + (viewH - thumbH) * clamp(f, 0, 1)
+        local hv = hot(W - 14, y0, 12, viewH)
+        if hv and M.pressed and not dragOwner then dragOwner = hub end
+        if dragOwner == hub then
+            if M.down then
+                hub.scrollT = clamp((M.y - y0 - thumbH / 2) / (viewH - thumbH), 0, 1) * hub.maxScroll
+            else dragOwner = nil end
+        end
+        local sa = ani(hub, "sba", (hv or dragOwner == hub) and 1 or 0, 14)
+        Rect(hub, "sbt", W - 8, y0, 3, viewH, C.track, 0.35, 40, true, 1.5)
+        Rect(hub, "sbh", W - 8 - sa, ty, 3 + 2 * sa, thumbH, C.accent, 0.5 + 0.5 * sa, 41, true, 2)
+    end
+end
+
+local function drawHeader(hub)
+    local sb = hub.searchBox
+    local hv = hot(SW + 10, 12, 240, 32)
+    if hv then sb.hovFrame = frameId end
+    if hv and M.pressed then focusText(sb) end
+    local foc = TI.owner == sb
+    local fa = ani(sb, "f", foc and 1 or 0, 14)
+    local ha = ani(sb, "h", hv and 1 or 0, 14)
+    Icon(sb, "ic", "search", SW + 26, 28, 16, mix(mix(C.dim, C.text, ha * 0.6), C.accent, fa), 1, 21)
+    if sb.text == "" and not foc then
+        Txt(sb, "ph", "Search...", SW + 42, 28, mix(C.dim, C.text, ha * 0.5), 1, 21, 13, false)
     else
-        obj.value = default or options[1]
+        Txt(sb, "tx", sb.text, SW + 42, 28, C.text, 1, 21, 13, false)
     end
-
-    if dy > 0 then
-        self:_r("Text", { Text = U(label), Color = T.Text, Font = FONT, Size = 12, ZIndex = 5 }, 8 + ind, y + 1)
+    if foc and floor(tick() * 2) % 2 == 0 then
+        Rect(sb, "car", SW + 43 + tw(sb.text, 13), 20, 1, 16, C.text, 1, 22, true, 0)
     end
-    self:_r("Square", { Filled = true, Color = T.Box, Size = V2(bw, 16), ZIndex = 5 }, 8 + ind, y + dy)
-    local bd = self:_r("Square", { Filled = false, Thickness = 1, Color = T.Border, Size = V2(bw, 16), ZIndex = 6 }, 8 + ind, y + dy)
-    local txt = self:_r("Text", { Text = "", Color = T.Text, Font = FONT, Size = 12, ZIndex = 7 }, 14 + ind, y + dy + 2)
-    -- small pixel arrow (5 / 3 / 1 px rows)
-    self:_r("Square", { Filled = true, Color = T.TextDim, Size = V2(3, 1), ZIndex = 7 }, 8 + ind + bw - 11, y + dy + 6)
-    self:_r("Square", { Filled = true, Color = T.TextDim, Size = V2(1, 1), ZIndex = 7 }, 8 + ind + bw - 10, y + dy + 7)
+    Rect(sb, "ul", SW + 20, HDR - 12, 220 * fa, 1.5, C.accent, 1, 22, true, 1)
+    hub.scope:draw(W - 16 - 84, 18, 84, 22)
+end
 
-    local maxc = max(floor((bw - 34) / 7), 4)
-    local function display()
-        local s
-        if obj.multi then
-            local t = {}
-            for _, o in ipairs(options) do if obj.value[o] then t[#t + 1] = o end end
-            s = (#t == 0) and "None" or table.concat(t, ", ")
+local function drawWindow(hub)
+    Box2(hub, "win", 0, 0, W, H, C.bg, C.border, 1, 10, 10)
+    Rect(hub, "sb", 1, 1, SW, H - 2, C.side, 1, 12, true, 9)
+    Rect(hub, "sb2", SW - 9, 1, 10, H - 2, C.side, 1, 12, true, 0)
+    Ln(hub, "sbl", SW, 1, SW, H - 1, C.border, 1, 13, 1)
+    Ln(hub, "hl", SW, HDR, W - 1, HDR, C.border, 1, 13, 1)
+    -- logo
+    local pulse = 0.5 + 0.5 * sin(tick() * 1.6)
+    Circ(hub, "lglow", 28, 28, 14, C.accent, 0.06 + 0.06 * pulse, 14, true)
+    Rect(hub, "lg1", 21, 25, 14, 6, C.accent, 1, 16, true, 2)
+    Rect(hub, "lg2", 25, 21, 6, 14, C.accent, 1, 16, true, 2)
+    local ts = min(19, (SW - 46 - 10) / max(0.01, tw(hub.title, 1)))
+    Txt(hub, "title", hub.title, 46, 28, C.text, 1, 16, ts, true)
+end
+
+local function drawPopup(hub)
+    local p = POP
+    if not p then return end
+    CLIP0, CLIP1 = nil, nil
+    local t = ani(p, "__t", p.closing and 0 or 1, 20)
+    if p.closing and t < 0.02 then POP = nil; return end
+    local ph = ani(p, "__h", p.measure(p), 18)
+    local pxx, pyy = p.x, p.y
+    local vw, vh = Camera.ViewportSize.X, Camera.ViewportSize.Y
+    if OX + (pxx + p.w) * SCL > vw - 8 then pxx = (vw - 8 - OX) / SCL - p.w end
+    if OX + pxx * SCL < 8 then pxx = (8 - OX) / SCL end
+    if OY + (pyy + ph) * SCL > vh - 8 then pyy = (vh - 8 - OY) / SCL - ph end
+    local save = GA
+    GA = save * t
+    local yoff = (1 - t) * -6
+    Rect(p, "sh", pxx - 1, pyy + yoff + 3, p.w + 2, ph + 2, C.black, 0.35, 200, true, 9)
+    Box2(p, "bg", pxx, pyy + yoff, p.w, ph, C.popup, C.border, 1, 201, 8)
+    CLIP0, CLIP1 = pyy + yoff + 2, pyy + yoff + ph - 2
+    ctxOK = not p.closing
+    p.content(p, pxx, pyy + yoff, 204)
+    CLIP0, CLIP1 = nil, nil
+    if M.pressed and p.born ~= frameId and not p.closing then
+        if not (M.x >= pxx and M.x <= pxx + p.w and M.y >= pyy and M.y <= pyy + ph) then p.closing = true end
+    end
+    GA = save
+end
+
+--========================================================================
+-- HUD (screen space): backdrop, watermark, bind list, toasts
+--========================================================================
+local function bindActive(it, b)
+    if b.mode == "Toggle" then return it.value end
+    if b.mode == "Hold" then return kd[b.vk] and true or false end
+    return false
+end
+
+local function drawWatermark(hub)
+    local a = ani(hub, "wma", hub:Get("wm") and 1 or 0, 10)
+    if a < 0.01 then return end
+    hub.wmT = (hub.wmT or 0) - DT
+    if hub.wmT <= 0 then
+        hub.wmT = 0.5
+        local name = (hub:Get("user_disp") == "Hidden") and "user" or LocalPlayer.Name
+        local ok, ping = pcall(GetPingValue)
+        hub.wmText = string.format("%s  |  %s  |  %d ms  |  %d fps", hub.title, name, ok and floor(ping) or 0, floor(hub.fps))
+    end
+    local text = hub.wmText or hub.title
+    local w = tw(text, 12) + 26
+    local vw = Camera.ViewportSize.X
+    GA = a
+    local x = vw - w - 16 + (1 - a) * 16
+    Box2(hub, "wm", x, 14, w, 26, C.group, C.border, 1, 150, 7)
+    Rect(hub, "wmL", x + 8, 15, w - 16, 2, C.accent, 1, 152, true, 1)
+    Txt(hub, "wmT", text, x + 13, 28, C.text, 1, 153, 12, true)
+    GA = 1
+end
+
+local function drawBindList(hub)
+    local a = ani(hub, "bla", hub:Get("bl") and 1 or 0, 10)
+    if a < 0.01 then return end
+    local activeOnly = hub:Get("bl_active")
+    local rows = {}
+    for _, it in ipairs(hub.bindList) do
+        for _, b in ipairs(it.binds) do
+            if b.show and b.vk ~= 0 then
+                local act = bindActive(it, b)
+                if act or not activeOnly then rows[#rows + 1] = { it.label, b.vk, act } end
+            end
+        end
+    end
+    local bl = hub.bl
+    -- drag by header (raw mouse, only while the menu is open)
+    if hub.open then
+        local over = M.rawx >= bl.x and M.rawx <= bl.x + 156 and M.rawy >= bl.y and M.rawy <= bl.y + 30
+        if M.pressed and over and not dragOwner then bl.drag = { M.rawx - bl.x, M.rawy - bl.y } end
+    end
+    if bl.drag then
+        if M.down then bl.x = M.rawx - bl.drag[1]; bl.y = M.rawy - bl.drag[2] else bl.drag = nil end
+    end
+    local target = 30 + #rows * 22 + ((#rows > 0) and 8 or 2)
+    local bh = ani(hub, "blh", target, 12)
+    GA = a
+    Box2(hub, "bl", bl.x, bl.y, 156, bh, C.group, C.border, 1, 150, 8)
+    Icon(hub, "blic", "grid", bl.x + 18, bl.y + 15, 14, C.accent, 1, 153)
+    Txt(hub, "blt", "Binds", bl.x + 32, bl.y + 15, C.text, 1, 153, 13, true)
+    CLIP0, CLIP1 = bl.y + 30, bl.y + bh - 3
+    for i, r in ipairs(rows) do
+        local ry = bl.y + 30 + (i - 1) * 22
+        local ra = ani(hub, "blr" .. i, r[3] and 1 or 0, 12)
+        Txt(hub, "bll" .. i, r[1], bl.x + 14, ry + 11, mix(C.dim, C.text, ra), 1, 153, 12, true)
+        Txt(hub, "blk" .. i, "[" .. keyName(r[2]) .. "]", bl.x + 156 - 12, ry + 11, mix(C.dim, C.accent, ra), 1, 153, 12, true, "r")
+    end
+    CLIP0, CLIP1 = nil, nil
+    GA = 1
+end
+
+local function drawToasts(hub)
+    local vw, vh = Camera.ViewportSize.X, Camera.ViewportSize.Y
+    local pos = hub:Get("toast_pos") or "Center Bottom"
+    local bottom = pos:find("Bottom") ~= nil
+    local cursor = 0
+    for i = #hub.toasts, 1, -1 do
+        local t = hub.toasts[i]
+        local h = t.total and 56 or 46
+        local sub = t.total and (floor(t.cur) .. "/" .. t.total) or t.text
+        local w = max(190, tw(t.title, 13) + (t.icon and 70 or 36), tw(sub, 12) + (t.icon and 70 or 36))
+        if t.dur and tick() - t.born > t.dur then t.closing = true end
+        local life = ani(t, "in", t.closing and 0 or 1, 12)
+        if t.closing and life < 0.02 then
+            release(t); table.remove(hub.toasts, i)
         else
-            s = tostring(obj.value)
+            local slot = ani(t, "slot", cursor, 12)
+            cursor = cursor + (h + 8) * life
+            local x
+            if pos:find("Left") then x = 16 elseif pos:find("Right") then x = vw - w - 16 else x = (vw - w) / 2 end
+            local y
+            if bottom then y = vh - 28 - h - slot + (1 - life) * 18 else y = 28 + slot - (1 - life) * 18 end
+            GA = life
+            Box2(t, "bg", x, y, w, h, C.popup, C.border, 1, 300, 9)
+            local tx = x + 16
+            if t.icon then
+                Icon(t, "ic", t.icon, x + 26, y + h / 2 - (t.total and 4 or 0), 18, C.text, 1, 303)
+                tx = x + 48
+            end
+            Txt(t, "ti", t.title, tx, y + 17, C.text, 1, 303, 13, true)
+            Txt(t, "tx", sub, tx, y + 33, C.dim, 1, 303, 12, false)
+            if t.total then
+                local bw = w - 32
+                local f = ani(t, "f", clamp(t.cur / t.total, 0, 1), 14)
+                Rect(t, "tr", x + 16, y + h - 12, bw, 3, C.track, 1, 303, true, 1.5)
+                Rect(t, "fl", x + 16, y + h - 12, max(2, bw * f), 3, C.text, 1, 304, true, 1.5)
+            end
+            GA = 1
         end
-        if #s > maxc then s = string.sub(s, 1, maxc - 2) .. ".." end
-        txt.d.Text = U(s)
-        win:_sync()
-    end
-    display()
-
-    function obj:Set(v, silent)
-        if self.multi then
-            local t = {}
-            if type(v) == "table" then
-                for k, x in pairs(v) do
-                    if type(k) == "number" then t[x] = true elseif x == true then t[k] = true end
-                end
-            end
-            self.value = t
-        else
-            self.value = v
-        end
-        Lib.Flags[id or ""] = self.value
-        display()
-        if self.cb and not silent then pcall(self.cb, self.value) end
-    end
-    function obj:Get() return self.value end
-    function obj:Export()
-        if not self.multi then return self.value end
-        local t = {}
-        for _, o in ipairs(options) do if self.value[o] then t[#t + 1] = o end end
-        return t
-    end
-    function obj:Import(v) self:Set(v) end
-
-    self:_h({ ox = 8 + ind, oy = y + dy, w = bw, h = 16,
-        onHover = function(b) bd.d.Color = b and T.Accent or T.Border end,
-        onDown = function(_, _, h)
-            local n = #options
-            local ph = n * 16 + 4
-            local ax, ay = h.ax - win.x, h.ay - win.y + 17
-            if ay + ph > win.h - 2 then ay = h.ay - win.y - ph - 1 end
-            local p = win:_openPopup(ax, ay, bw, ph)
-            local rows = {}
-            local function recolor()
-                for i = 1, n do
-                    local o = options[i]
-                    local on = obj.multi and obj.value[o] or (not obj.multi and obj.value == o)
-                    rows[i].txt.d.Color = on and T.Accent or T.Text
-                end
-            end
-            for i = 1, n do
-                local ry = 2 + (i - 1) * 16
-                local row = {}
-                row.bg = win:_prec(p, "Square", { Filled = true, Color = T.Panel, Size = V2(bw - 4, 16), ZIndex = 32 }, 2, ry)
-                row.txt = win:_prec(p, "Text", { Text = U(options[i]), Color = T.Text, Font = FONT, Size = 12, ZIndex = 33 }, 8, ry + 2)
-                rows[i] = row
-                win:_phit(p, { ox = 2, oy = ry, w = bw - 4, h = 16,
-                    onHover = function(b) row.bg.d.Color = b and T.Hover or T.Panel end,
-                    onDown = function()
-                        local o = options[i]
-                        if obj.multi then
-                            local t = {}
-                            for k, x in pairs(obj.value) do t[k] = x end
-                            t[o] = (not t[o]) or nil
-                            obj:Set(t)
-                            recolor()
-                        else
-                            obj:Set(o)
-                            win:_closePopup()
-                        end
-                    end })
-            end
-            recolor()
-        end })
-
-    reg(id, obj, obj.value)
-    return obj
-end
-
-----------------------------------------------------------------------
--- Button
-----------------------------------------------------------------------
-function Section:AddButton(label, cb)
-    local ind = self:_ind()
-    local bw = self.box.w - 16 - ind
-    local y = self:_grow(26)
-    local bg = self:_r("Square", { Filled = true, Color = T.Box, Size = V2(bw, 20), ZIndex = 5 }, 8 + ind, y + 2)
-    local bd = self:_r("Square", { Filled = false, Thickness = 1, Color = T.Border, Size = V2(bw, 20), ZIndex = 6 }, 8 + ind, y + 2)
-    local txt = self:_r("Text", { Text = U(label), Color = T.Text, Font = FONT, Size = 12, Center = true, ZIndex = 7 }, 8 + ind + bw / 2, y + 12)
-    self:_h({ ox = 8 + ind, oy = y + 2, w = bw, h = 20,
-        onDown = function()
-            bg.d.Color = T.Accent
-            txt.d.Color = T.Background
-            if cb then pcall(cb) end
-        end,
-        onUp = function() bg.d.Color = T.Box txt.d.Color = T.Text end,
-        onHover = function(b) bd.d.Color = b and T.Accent or T.Border end })
-    return { SetText = function(_, t) txt.d.Text = U(t) end }
-end
-
-----------------------------------------------------------------------
--- Notifications (bottom-right, stacked upward)
-----------------------------------------------------------------------
-local function layoutNotes()
-    local v = viewSize()
-    for i = 1, #Lib.Notes do
-        local n = Lib.Notes[i]
-        local x, y = v.X - 250 - 20, v.Y - 52 * i - 10
-        n.bg.Position = V2(x, y)
-        n.bd.Position = V2(x, y)
-        n.bar.Position = V2(x, y)
-        n.title.Position = V2(x + 12, y + 7)
-        n.text.Position = V2(x + 12, y + 25)
     end
 end
 
-function Lib:Notify(title, text, secs)
-    local n = { t0 = tick(), secs = secs or 5 }
-    n.bg = mk("Square", { Filled = true, Color = T.Background, Size = V2(250, 44), ZIndex = 50 })
-    n.bd = mk("Square", { Filled = false, Thickness = 1, Color = outlineCol(), Size = V2(250, 44), ZIndex = 51 })
-    n.bar = mk("Square", { Filled = true, Color = T.Accent, Size = V2(3, 44), ZIndex = 52 })
-    n.title = mk("Text", { Text = U(title or "ProjectFuzz"), Color = T.White, Font = FONT, Size = 12, ZIndex = 52 })
-    n.text = mk("Text", { Text = tostring(text or ""), Color = T.TextDim, Font = FONT, Size = 12, ZIndex = 52 })
-    table.insert(Lib.Notes, 1, n)
-    layoutNotes()
-    for _, d in ipairs({ n.bg, n.bd, n.bar, n.title, n.text }) do d.Visible = true end
+--========================================================================
+-- Frame step
+--========================================================================
+local function pollInput()
+    M.rawx, M.rawy = Mouse.X, Mouse.Y
+    local down = ismouse1pressed() and isrbxactive()
+    M.pressed = down and not M.down
+    M.down = down
+    M.x, M.y = (M.rawx - OX) / SCL, (M.rawy - OY) / SCL
 end
 
-----------------------------------------------------------------------
--- Live colours: Lib:SetColor("Accent", Color3) recolors every drawing that uses that theme colour.
--- Roles: Accent, Outline, Inner, GradA, GradB, Background, Panel, Box, Border, Text, TextDim, Hover, TabActive
-----------------------------------------------------------------------
-local DEFAULTS = {}
-for k, v in pairs(T) do DEFAULTS[k] = v end
+local function step(hub)
+    local now = tick()
+    DT = clamp(now - hub.last, 0.001, 0.05)
+    hub.last = now
+    frameId = frameId + 1
+    hub.fps = lerp(hub.fps, 1 / DT, 0.05)
+    stepTheme()
 
-local function sameCol(a, b)
-    return math.abs(a.R - b.R) < 0.002 and math.abs(a.G - b.G) < 0.002 and math.abs(a.B - b.B) < 0.002
-end
+    -- settings that drive the menu itself
+    local dpi = hub:Get("dpi")
+    hub.scl = dpi and ((tonumber((dpi:gsub("%%", ""))) or 100) / 100) or 1
+    local fade = ani(hub, "fade", hub.open and 1 or 0, 12)
+    SCL = hub.scl
+    OX = hub.pos[1]
+    OY = hub.pos[2] + (1 - fade) * 14
+    GA = 1; CLIP0, CLIP1 = nil, nil
+    pollInput()
 
-function Lib:SetColor(role, c)
-    local old = T[role]
-    if not old or typeof(c) ~= "Color3" or sameCol(old, c) then return end
-    T[role] = c
-    local isGrad = (role == "GradA" or role == "GradB")
-    -- gradient bars / slider fills change when a gradient colour changes, or (flat mode) when the Accent changes
-    local barsChange = isGrad or (role == "Accent" and not Lib.UseGradient)
-    local function walk(list)
-        for i = 1, #list do
-            local r = list[i]
-            if r.gt then
-                if barsChange then r.col = gradAt(r.gt) r.d.Color = r.col end
-            elseif not isGrad and r.col and sameCol(r.col, old) then
-                r.col = c
-                r.d.Color = c
+    local active = isrbxactive()
+    local busy = false
+
+    -- key capture (bind rebinding)
+    if CAP and active then
+        busy = true
+        for vk = 2, 254 do
+            local _, p = key(vk)
+            if p then
+                local c = CAP; CAP = nil
+                if vk ~= 0x1B then c.set(vk) end
+                break
             end
         end
     end
-    for i = 1, #Lib.Windows do
-        local w = Lib.Windows[i]
-        walk(w.chrome)
-        for j = 1, #w.tabs do walk(w.tabs[j].recs) end
-        if w.popup then walk(w.popup.recs) end
-        if w.outlineRec and (role == "Accent" or role == "Outline" or role == "Background") then
-            w.outlineRec.col = outlineCol()
-            w.outlineRec.d.Color = w.outlineRec.col
-        end
-    end
-end
-
-function Lib:ResetColors()
-    for role, c in pairs(DEFAULTS) do Lib:SetColor(role, c) end
-end
-
--- UI Gradient on / off. Off = everything (bars, slider fills, outline, notification border) is the flat T.Accent.
--- On = bars and slider fills run GradA -> GradB and the window outline uses T.Outline.
-function Lib:SetGradient(on)
-    on = (on == true)
-    if Lib.UseGradient == on then return end
-    Lib.UseGradient = on
-    local function walk(list)
-        for i = 1, #list do
-            local r = list[i]
-            if r.gt then
-                r.col = gradAt(r.gt)
-                r.d.Color = r.col
-            end
-        end
-    end
-    for i = 1, #Lib.Windows do
-        local w = Lib.Windows[i]
-        walk(w.chrome)
-        for j = 1, #w.tabs do walk(w.tabs[j].recs) end
-        local o = w.outlineRec
-        if o then
-            o.col = outlineCol()
-            o.d.Color = o.col
-        end
-    end
-end
-
-----------------------------------------------------------------------
--- Config
-----------------------------------------------------------------------
-function Lib:SaveConfig(name)
-    if not writefile then return false, "writefile unavailable" end
-    local data = {}
-    for id, obj in pairs(Lib.Objects) do
-        if obj.Export then data[id] = obj:Export() end
-    end
-    local ok, err = pcall(function() writefile("ProjectFuzz_" .. (name or "default") .. ".json", HttpService:JSONEncode(data)) end)
-    return ok, err
-end
-
-function Lib:LoadConfig(name)
-    local file = "ProjectFuzz_" .. (name or "default") .. ".json"
-    if not (isfile and readfile and isfile(file)) then return false, "no config" end
-    local ok, data = pcall(function() return HttpService:JSONDecode(readfile(file)) end)
-    if not ok or type(data) ~= "table" then return false, "unreadable config" end
-    for id, v in pairs(data) do
-        local obj = Lib.Objects[id]
-        if obj and obj.Import then pcall(obj.Import, obj, v) end
-    end
-    return true
-end
-
-----------------------------------------------------------------------
--- Per-frame step (one RenderStepped for every window)
-----------------------------------------------------------------------
-local mouse
-do
-    local okM, m = pcall(function() return Players.LocalPlayer:GetMouse() end)
-    if okM and m then
-        mouse = m
-    else
-        mouse = { X = 0, Y = 0 }
-        warn("[ProjectFuzz] could not get the mouse, clicking will not work")
-    end
-end
-
-local function hitTest(win, list, mx, my)
-    for i = #list, 1, -1 do
-        local h = list[i]
-        if win:_vis(h) then
-            local ax, ay = win:_abs(h)
-            if mx >= ax and mx <= ax + h.w and my >= ay and my <= ay + h.h then
-                h.ax, h.ay = ax, ay
-                return h
-            end
-        end
-    end
-    return nil
-end
-
-function Window:_step(mx, my, down)
-    -- menu key
-    if not self.listening and iskeypressed then
-        local k = iskeypressed(self.toggleKey) == true
-        if k and not self.tkDown then self:SetVisible(not self.visible) end
-        self.tkDown = k
-    end
-
-    local a = self.active
-    if a and a.dirty and self.visible then a:_reflow() end
-    if self.syncDirty then self:_sync() end
-
-    -- keybinds (run even while the menu is hidden)
-    if iskeypressed then
-        if self.listening then
-            local kb = self.listening
-            if tick() - self.listenAt > 0.15 then
-                for vk = 3, 254 do
-                    if vk ~= 1 and vk ~= 2 and iskeypressed(vk) == true then
-                        kb:Set(vk == 27 and 0 or vk)
-                        self.listening = nil
-                        break
-                    end
-                end
-            end
-        else
-            for i = 1, #self.keybinds do
-                local kb = self.keybinds[i]
-                if kb.key ~= 0 then
-                    local d = iskeypressed(kb.key) == true
-                    if kb.mode == "Hold" then
-                        if d ~= kb.state then kb.state = d Lib.Flags[kb.id or ""] = d if kb.cb then pcall(kb.cb, d) end end
-                    elseif kb.mode == "Always" then
-                        kb.state = true
-                    elseif d and not kb.down then
-                        kb.state = not kb.state
-                        Lib.Flags[kb.id or ""] = kb.state
-                        if kb.cb then pcall(kb.cb, kb.state) end
-                    end
-                    kb.down = d
-                end
-            end
-        end
-    end
-
-    if not self.visible then self.wasDown = down return end
-
-    local was = self.wasDown
-    self.wasDown = down
-    local pop = self.popup
-
-    if down and not was then
-        if isrbxactive and not isrbxactive() then return end
-        if pop then
-            local h = hitTest(self, pop.hits, mx, my)
-            if h then
-                self.cap = h
-                if h.onDown then h.onDown(mx, my, h) end
-            else
-                local px, py = self.x + pop.org.x, self.y + pop.org.y
-                if not (mx >= px and mx <= px + pop.w and my >= py and my <= py + pop.h) then self:_closePopup() end
-            end
-            return
-        end
-        local h = hitTest(self, self.hits, mx, my)
-        if h then
-            self.cap = h
-            if h.onDown then h.onDown(mx, my, h) end
-        end
-    elseif down then
-        local c = self.cap
-        if c and c.onDrag then
-            c.ax, c.ay = self:_abs(c)
-            c.onDrag(mx, my, c)
-        end
-    else
-        local c = self.cap
-        if c and c.onUp then c.onUp(mx, my, c) end
-        self.cap = nil
-        -- hover
-        local cand
-        if self.popup then cand = hitTest(self, self.popup.hits, mx, my) else cand = hitTest(self, self.hits, mx, my) end
-        if cand ~= self.hover then
-            local old = self.hover
-            self.hover = cand
-            if old and old.onHover then old.onHover(false) end
-            if cand and cand.onHover then cand.onHover(true) end
-        end
-    end
-end
-
-local lastErr
-local conn = RunService.RenderStepped:Connect(function()
-    if not Lib.alive then return end
-    local ok, err = pcall(function()
-        local down = ismouse1pressed and ismouse1pressed() or false
-        local mx, my = mouse.X, mouse.Y
-        for i = 1, #Lib.Windows do Lib.Windows[i]:_step(mx, my, down) end
-
-        local notes = Lib.Notes
+    -- text input
+    if TI.owner and active then
+        busy = true
+        local o = TI.owner
         local changed = false
-        for i = #notes, 1, -1 do
-            local n = notes[i]
-            if tick() - n.t0 >= n.secs then
-                for _, d in ipairs({ n.bg, n.bd, n.bar, n.title, n.text }) do pcall(function() d:Remove() end) end
-                table.remove(notes, i)
-                changed = true
+        local shift = key(0x10)
+        for _, vk in ipairs(TYPEVK) do
+            local _, p = key(vk)
+            if p and #o.text < 24 then
+                local ch = vkChar(vk, shift)
+                if ch then o.text = o.text .. ch; changed = true end
             end
         end
-        if changed then layoutNotes() end
+        local bd, bp = key(8)
+        if bp then o.text = o.text:sub(1, #o.text - 1); TI.bs = 0; changed = true
+        elseif bd then
+            TI.bs = TI.bs + DT
+            if TI.bs > 0.45 then o.text = o.text:sub(1, #o.text - 1); TI.bs = 0.4; changed = true end
+        end
+        local _, ent = key(13)
+        local _, esc = key(27)
+        if ent or esc then TI.owner = nil end
+        if changed and o.onText then o.onText(o.text) end
+    end
+
+    -- menu toggle
+    if active and not busy then
+        local _, p = key(hub:Get("menu_key") or 0x46)
+        if p then
+            hub.open = not hub.open
+            if not hub.open then closePop(); TI.owner = nil end
+        end
+    end
+
+    -- bind processing (works with the menu closed)
+    if active and not busy then
+        for _, it in ipairs(hub.bindList) do
+            for _, b in ipairs(it.binds) do
+                if b.vk ~= 0 and b.mode ~= "Off" then
+                    local d, p = key(b.vk)
+                    if b.mode == "Toggle" then
+                        if p then it:Set(not it.value) end
+                    elseif d ~= b.last then
+                        b.last = d
+                        it:Set(d)
+                    end
+                end
+            end
+        end
+    end
+
+    -- mouse wheel scroll (best effort) is applied in the input hook below
+    ctxOK = hub.open and fade > 0.85 and not (POP and not POP.closing)
+
+    -- window dragging
+    if hub.drag then
+        if M.down then
+            hub.pos[1] = M.rawx - hub.drag[1]
+            hub.pos[2] = M.rawy - hub.drag[2] + 0
+        else hub.drag = nil end
+    elseif ctxOK and M.pressed and not dragOwner and M.y >= 0 and M.y < HDR and M.x >= 0 and M.x <= W - 110
+        and not (M.x > SW + 10 and M.x < SW + 250) then
+        hub.drag = { M.rawx - hub.pos[1], M.rawy - hub.pos[2] }
+    end
+
+    -- screen-space HUD
+    local mOX, mOY, mSCL = OX, OY, SCL
+    OX, OY, SCL = 0, 0, 1
+    local vw, vh = Camera.ViewportSize.X, Camera.ViewportSize.Y
+    if hub:Get("blur") then
+        local bd = ani(hub, "bd", hub.open and (hub:Get("blurpx") or 40) / 100 * 0.55 or 0, 8)
+        Rect(hub, "bd", 0, 0, vw, vh, C.black, bd, 0, true, 0)
+    end
+    drawWatermark(hub)
+    drawBindList(hub)
+    drawToasts(hub)
+    OX, OY, SCL = mOX, mOY, mSCL
+
+    -- menu
+    local trans = (hub:Get("trans") or 0) / 100
+    GA = fade * (1 - trans)
+    if fade > 0.01 then
+        drawWindow(hub)
+        drawSidebar(hub)
+        drawHeader(hub)
+        drawContent(hub)
+    end
+    drawPopup(hub)
+    GA = 1; CLIP0, CLIP1 = nil, nil
+
+    -- end-of-frame input housekeeping
+    if dragOwner and not M.down then dragOwner = nil end
+    if M.pressed and TI.owner and TI.owner.hovFrame ~= frameId then TI.owner = nil end
+
+    -- startup toast
+    if not hub.startToast and now - hub.born > 0.6 then
+        hub.startToast = true
+        hub:Toast({ Title = "Loaded cloud config", Text = "Unnamed 3", Icon = "download", Duration = 3.5 })
+    end
+    sweep()
+end
+
+--========================================================================
+-- Constructor
+--========================================================================
+function Lime.Create(opts)
+    opts = opts or {}
+    local hub = setmetatable({}, Lime)
+    hub.title = opts.Title or "placeholder"
+    hub.pos = opts.Position or { 60, 40 }
+    hub.pages, hub.cats, hub.items, hub.bindList, hub.toasts = {}, {}, {}, {}, {}
+    hub.open = true
+    hub.query = ""
+    hub.clock, hub.scroll, hub.scrollT, hub.maxScroll = 0, 0, 0, 0
+    hub.scl, hub.fps = 1, 60
+    hub.last, hub.born = tick(), tick()
+    hub.bl = { x = 16, y = 260 }
+    hub.searchBox = { text = "", onText = function(t) hub.query = t; hub.scrollT = 0 end }
+    hub.scope = newItem("choice", { label = "", items = { "Global", "Pistols", "Rifles", "Snipers" }, value = 1, cw = 84, bare = true, h = 20 })
+    hub.PageAPI = PageAPI
+    return hub
+end
+
+function Lime:Run()
+    local first = self.items["show_on_load"]
+    if first then self.open = first.value end
+    _G.__PlaceholderHub = self
+    self.conn = RunService.RenderStepped:Connect(function()
+        if self.dead then return end
+        local ok, err = pcall(step, self)
+        if not ok and not self.warned then self.warned = true; warn("[placeholder] " .. tostring(err)) end
     end)
-    if not ok and err ~= lastErr then
-        lastErr = err
-        warn("[ProjectFuzz] " .. tostring(err))
-    end
-end)
-
-function Lib:Unload()
-    Lib.alive = false
-    pcall(function() conn:Disconnect() end)
-    for i = #Lib.Windows, 1, -1 do pcall(Lib.Windows[i].Destroy, Lib.Windows[i]) end
-    for _, n in ipairs(Lib.Notes) do
-        for _, d in ipairs({ n.bg, n.bd, n.bar, n.title, n.text }) do pcall(function() d:Remove() end) end
-    end
-    Lib.Notes = {}
-    if genv and genv.ProjectFuzzUI == Lib then genv.ProjectFuzzUI = nil end
 end
 
-print("[ProjectFuzz] library loaded")
-return Lib
-
-end)()
-
-local Win = Lib:CreateWindow({ Title = "ProjectFuzz | v1.0", Width = 725, Height = 628, ToggleKey = 161 }) -- RShift hides / shows
-
-local Weapon = Win:AddTab("Weapon")
-local Visual = Win:AddTab("Visual")
-local World  = Win:AddTab("World")
-local Misc   = Win:AddTab("Misc")
-local Settings = Win:AddTab("Settings")
-
--- WEAPON: left column
-local mods = Weapon:AddSection("Weapon Modifiers", "Left")
-for _, n in ipairs({ "Recoil Override", "No Bob", "Instant Lean", "Anti Obstruction", "Auto Fill Mags", "Instant ADS",
-    "Instant Equip", "Sprint While Shooting", "No Spread", "Multibullet", "Ignore Water", "Fire Underwater",
-    "Remove Weight", "Firerate Override", "Force Firemode", "Remove Aim Restrictions", "Instant Reload" }) do
-    mods:AddToggle("wm_" .. n, n, false)
+-- best-effort mouse wheel support (ignored silently if the API isn't available)
+local function hookWheel(hub)
+    pcall(function()
+        local UIS = game:GetService("UserInputService")
+        UIS.InputChanged:Connect(function(input)
+            if hub.dead then return end
+            if input.UserInputType == Enum.UserInputType.MouseWheel and hub.open then
+                hub.scrollT = clamp(hub.scrollT - input.Position.Z * 48, 0, hub.maxScroll)
+            end
+        end)
+    end)
 end
-mods:AddDropdown("reload_mode", "Reload Mode", { "Packet", "Normal", "Instant" }, "Packet")
-mods:AddToggle("auto_reload", "Auto Reload", false)
-local fr = mods:AddToggle("force_render", "Force Render", false)
-fr:AddKeybind("force_render_kb", 0, "Toggle")
 
-local res = Weapon:AddSection("Resolvers", "Left")
-res:AddToggle("resolvers", "Resolvers", false)
+--========================================================================
+-- Reference build
+--========================================================================
+local hub = Lime.Create({ Title = "placeholder", Position = { 60, 40 } })
 
--- WEAPON: right column (tabbox with Aim / Crosshair)
-local box = Weapon:AddTabbox("Right")
-local aim = box:AddTab("Aim")
-local xh  = box:AddTab("Crosshair")
+local ragebot  = hub:Page("Ragebot",  { category = "Assistance", icon = "crosshair" })
+local legitbot = hub:Page("Legitbot", { category = "Assistance", icon = "brush" })
+local visuals  = hub:Page("Visuals",  { category = "Visuals",    icon = "mountain" })
+local inventory= hub:Page("Inventory",{ category = "Other",      icon = "blade" })
+local misc     = hub:Page("Misc",     { category = "Other",      icon = "bolt" })
+local settings = hub:Page("Settings", { category = "Common",     icon = "gear" })
+local players  = hub:Page("Players",  { category = "Common",     icon = "user" })
+local configs  = hub:Page("Configs",  { parent = "Settings",     icon = "file" })
+local display  = hub:Page("Display",  { parent = "Settings",     icon = "monitor" })
+local notifs   = hub:Page("Notifications", { parent = "Settings", icon = "bell" })
 
-local m = aim:AddKeybind("aim_mode_kb", "Mode", 67, "Hold") -- C
-aim:AddDropdown("aim_mode", "", { "Silent Aim", "Camera", "Mouse" }, "Silent Aim")
-aim:AddToggle("hsr", "HSR Targeting", false)
-aim:AddToggle("force_hitbox", "Force Hitbox", false)
-local snap = aim:AddToggle("snap_line", "Snap Line", false)
-snap:AddColorPicker("snap_line_col", Color3.fromRGB(255, 255, 255))
-aim:AddToggle("t_players", "Target Players", false)
-aim:AddToggle("t_ai", "Target AI", false)
-aim:AddToggle("t_veh", "Target Vehicles", false)
-aim:AddToggle("wallcheck", "Wall Check", false)
-aim:AddToggle("wallbang", "Allow Wallbangs", false)
-aim:AddToggle("smart", "Smart Target", false)
-aim:AddToggle("sticky", "Sticky Target", false)
-aim:AddDropdown("aim_part", "Aim Part", { "Head", "Torso", "Random" }, "Head")
-local fov = aim:AddToggle("show_fov", "Show FOV", false)
-fov:AddColorPicker("fov_col2", Color3.fromRGB(255, 255, 255))
-fov:AddColorPicker("fov_col", Color3.fromRGB(255, 255, 255))
-aim:AddSlider("fov", "FOV", 0, 1000, 300, { Suffix = "px", ShowMax = true })
-aim:AddSlider("hit_chance", "Hit Chance", 0, 100, 100, { Suffix = "%", ShowMax = true })
-local manip = aim:AddToggle("manip", "Manipulation", false)
-manip:AddKeybind("manip_kb", 86, "Toggle")
-local trig = aim:AddToggle("trigger", "Triggerbot", false)
-trig:AddKeybind("trigger_kb", 20, "Hold")
+-- Ragebot ---------------------------------------------------------------
+local aim = ragebot:Box("Aimbot", "Left")
+aim:Switch("rage_on", "Enable Ragebot", true, { bold = true, binds = {
+    { key = 0x48, mode = "Toggle", show = true }, { key = 0x4B, mode = "Toggle", show = true } } })
 
-xh:AddToggle("xh_on", "Enabled", false):AddColorPicker("xh_col", Color3.fromRGB(255, 255, 255))
-xh:AddSlider("xh_size", "Size", 1, 30, 8)
+local tgt = ragebot:Box("Targeting", "Left")
+tgt:Choice("targeting", "Targeting", { "Highest Damage", "Closest To Crosshair", "Lowest Health" }, 1, { width = 122 })
+tgt:Choice("scan_origin", "Scan Origin", { "Fair", "Safe", "Aggressive" }, 3, { width = 122 })
+tgt:Multi("hitboxes", "Hitboxes", { "Head", "Torso", "Arms", "Legs", "Feet" }, { "Head", "Torso", "Arms" }, { width = 122 })
+tgt:Switch("extrap", "Extrapolation", false, { dim = true, bind = true })
+tgt:Switch("multipoint", "Multipoint", true, { dim = true, bind = true })
+local manip = tgt:Popover("Manipulation", "Manipulation", 200)
+manip:Switch("peek_assist", "Peek Assist", false)
+manip:Slider("peek_dist", "Distance", 0, 10, 4.0, { dec = 1, suffix = " st", trackX = 70 })
+manip:Switch("desync", "Desync", false)
 
--- Other tabs get a section each so every tab has content
-Visual:AddSection("ESP", "Left"):AddToggle("esp_on", "Enabled", false)
-World:AddSection("World", "Left"):AddToggle("fullbright", "Fullbright", false)
-local cfg = Misc:AddSection("Config", "Left")
-cfg:AddButton("Save Config", function() Lib:SaveConfig("default") Lib:Notify("Config", "Saved") end)
-cfg:AddButton("Load Config", function() Lib:LoadConfig("default") Lib:Notify("Config", "Loaded") end)
-cfg:AddButton("Unload", function() Lib:Unload() end)
--- SETTINGS: change the menu colours live
-local ROLES = {
-    { "Accent", "Menu Color" }, { "Inner", "Inner Line" }, { "Background", "Background" }, { "Panel", "Panel" },
-    { "Border", "Border" }, { "Text", "Text" },
-    -- only shown while UI Gradient is on:
-    { "GradA", "Gradient Start" }, { "GradB", "Gradient End" }, { "Outline", "Window Outline" },
-}
-local GRAD_ROLES = { GradA = true, GradB = true, Outline = true }
-local colors = Settings:AddSection("Menu Colors", "Left")
-local function addRolePicker(r)
-    colors:AddColorPicker("col_" .. r[1], r[2], Lib.Theme[r[1]], function(c) Lib:SetColor(r[1], c) end)
+local fil = ragebot:Box("Filters", "Left")
+fil:Slider("min_dmg", "Minimum Damage", 0, 120, 0, { noTrack = true, zeroText = "Off", dot = true })
+fil:Slider("hit_chance", "Hit Chance", 0, 100, 65, { suffix = "%" })
+fil:Switch("autowall", "Autowall", false, { bind = true })
+
+local perf = ragebot:Box("Performance", "Left")
+perf:Slider("tick_rate", "Tick Rate", 1, 240, 120, { suffix = " Hz" })
+perf:Slider("fov_limit", "FOV Limit", 1, 180, 180, { suffix = "°" })
+
+local rv = ragebot:Box("Visuals", "Left")
+rv:Switch("fov_vis", "Field of View", false, { color = Color3.fromRGB(32, 201, 190) })
+
+local anti = ragebot:Box("Anti Aim", "Right")
+anti:Switch("anti_aim", "Anti Aim", false, { binds = { { key = 0x4A, mode = "Toggle", show = true } } })
+anti:Choice("pitch", "Pitch", { "Down", "Up", "Zero", "Off" }, 1, { width = 122 })
+anti:Choice("yaw", "Yaw", { "Back", "Left", "Right", "Spin" }, 1, { width = 122 })
+
+local wep = ragebot:Box("Weapon", "Right")
+wep:Switch("inf_pen", "Infinite Penetration", false, { bind = true })
+wep:Switch("red_spread", "Reduce Spread", false, { bind = true })
+wep:Switch("red_recoil", "Reduce Recoil", false, { bind = true })
+
+-- Placeholder pages (waiting for more references) -----------------------
+for _, pg in ipairs({ legitbot, visuals, inventory, misc, players }) do
+    pg:Box("Coming soon", "Left"):Caption("This page is a placeholder until more references are sent.")
 end
-for _, r in ipairs(ROLES) do
-    if not GRAD_ROLES[r[1]] then addRolePicker(r) end
-end
--- UI Gradient: off = one flat colour (Menu Color) everywhere; on = the gradient settings drop down below
-local gradFold
-local gradToggle = colors:AddToggle("ui_gradient", "UI Gradient", false, function(v)
-    Lib:SetGradient(v)
-    colors:SetFold(gradFold, v)
-end)
-gradFold = colors:BeginFold(false)
-for _, r in ipairs(ROLES) do
-    if GRAD_ROLES[r[1]] then addRolePicker(r) end
-end
-colors:EndFold()
 
-local function syncPickers()
-    for _, r in ipairs(ROLES) do Lib.Objects["col_" .. r[1]]:Set(Lib.Theme[r[1]], true) end
-end
-local function rgb(r, g, b) return Color3.fromRGB(r, g, b) end
-local PRESETS = {
-    ["Orange / Pink"] = { GradA = rgb(255, 150, 50), GradB = rgb(255, 55, 140), Accent = rgb(255, 102, 95), Outline = rgb(255, 102, 96) },
-    ["Purple"]        = { GradA = rgb(130, 90, 255), GradB = rgb(210, 110, 255), Accent = rgb(176, 124, 255), Outline = rgb(176, 124, 254) },
-    ["Blue / Cyan"]   = { GradA = rgb(60, 120, 255), GradB = rgb(60, 220, 255), Accent = rgb(60, 170, 255), Outline = rgb(60, 170, 254) },
-    ["Green"]         = { GradA = rgb(60, 200, 120), GradB = rgb(190, 240, 80), Accent = rgb(120, 220, 100), Outline = rgb(120, 220, 99) },
-    ["Red"]           = { GradA = rgb(255, 60, 60), GradB = rgb(255, 120, 40), Accent = rgb(255, 90, 50), Outline = rgb(255, 90, 49) },
-    ["White"]         = { GradA = rgb(255, 255, 255), GradB = rgb(170, 170, 185), Accent = rgb(235, 235, 245), Outline = rgb(235, 235, 244) },
-}
-local presets = Settings:AddSection("Presets", "Right")
-presets:AddDropdown("color_preset", "Preset", { "Orange / Pink", "Purple", "Blue / Cyan", "Green", "Red", "White" }, "Purple", function(v)
-    local p = PRESETS[v]
-    if not p then return end
-    for role, c in pairs(p) do Lib:SetColor(role, c) end
-    syncPickers()
-end)
-presets:AddButton("Reset Colors", function()
-    Lib:ResetColors()
-    gradToggle:Set(false) -- back to the flat colour
-    syncPickers()
-end)
-presets:AddLabel("Changes apply instantly")
+-- Settings > Configs ----------------------------------------------------
+local cfg = configs:Box("Configs", "Left")
+cfg:Switch("auto_save", "Auto Save", false)
+cfg:Entry("cfg_name", "Config", "Config name...")
+cfg:Buttons({
+    { "Create", function() hub:Toast({ Title = "Config created", Text = hub:Get("cfg_name") ~= "" and hub:Get("cfg_name") or "Unnamed", Icon = "check", Duration = 2.5 }) end },
+    { "Delete", function() hub:Toast({ Title = "Config deleted", Icon = "trash", Duration = 2.5 }) end },
+    { "Save",   function() hub:Toast({ Title = "Config saved", Icon = "check", Duration = 2.5 }) end },
+    { "Load",   function() hub:Toast({ Title = "Loaded cloud config", Text = "Unnamed 3", Icon = "download", Duration = 3 }) end },
+    { "Autoload", function() hub:Toast({ Title = "Autoload set", Icon = "info", Duration = 2.5 }) end, full = true },
+})
 
-Lib:Notify("ProjectFuzz", "Loaded - RShift toggles the menu", 5)
+-- Settings > Display ----------------------------------------------------
+local dsp = display:Box("Display", "Left")
+dsp:Choice("dpi", "DPI Scale", { "75%", "100%", "125%", "150%" }, 2, { width = 100 })
+dsp:Slider("trans", "Menu Transparency", 0, 80, 0, { noTrack = true, zeroText = "Off", dot = true, suffix = "%" })
+dsp:Switch("blur", "Menu Blur", true)
+dsp:Slider("blurpx", "Blur Strength", 0, 100, 40, { suffix = "px", trackX = 100 })
+local stp = display:Box("Startup", "Left")
+stp:Switch("show_on_load", "Show Menu on Load", true)
+stp:KeyPill("menu_key", "Menu Toggle", 0x46, { dim = true })
+local hud = display:Box("HUD", "Right")
+hud:Choice("user_disp", "Username Display", { "Visible", "Hidden" }, 1, { width = 100 })
+hud:Switch("wm", "Show Watermark", false)
+hud:Switch("bl", "Show Bind List", true)
+hud:Switch("bl_active", "Active Binds Only", true)
+hud:Choice("toast_pos", "Toast Position", { "Center Bottom", "Bottom Right", "Bottom Left", "Top Right", "Top Left" }, 1, { width = 112 })
+local thm = display:Box("Themes", "Right")
+thm:ThemeList("theme")
+thm:Buttons({
+    { "Create", function() hub:Toast({ Title = "Theme editor", Text = "Not built yet", Icon = "info", Duration = 2 }) end },
+    { "Delete", function() hub:Toast({ Title = "Theme editor", Text = "Not built yet", Icon = "info", Duration = 2 }) end },
+    { "Edit",   function() hub:Toast({ Title = "Theme editor", Text = "Not built yet", Icon = "info", Duration = 2 }) end },
+    { "Load",   function() hub:Set("theme", hub.items["theme"].value) end },
+})
+
+-- Settings > Notifications ---------------------------------------------
+local nt = notifs:Box("Toasts", "Left")
+nt:Caption("A toast is as wide as its text. Its title, text and bar are optional, and a toast with a total shows a progress bar.")
+nt:Buttons({
+    { "With Icon", function() hub:Toast({ Title = "Loaded cloud config", Text = "Unnamed 3", Icon = "download", Duration = 3 }) end },
+    { "Start Download", function()
+        local t = hub:Toast({ Title = "Downloading assets", Total = 40, Current = 0 })
+        task.spawn(function()
+            for i = 1, 40 do
+                wait(0.06)
+                if hub.dead or t.closing then return end
+                t:Set(i)
+            end
+            wait(0.6)
+            t:Close()
+        end)
+    end },
+})
+
+hub:Select(ragebot)
+hookWheel(hub)
+hub:Run()
