@@ -1467,6 +1467,7 @@ function Lime:Select(p)
     end
     if self.active ~= p then
         self.active = p
+        self.sideReveal = true               -- the sidebar scrolls the picked page into view
         self.clock = 0
         self.scrollT = 0
         if self.__a then self.__a.scroll = 0 end
@@ -1886,9 +1887,13 @@ local function sideRow(hub, p, y, h, alpha, child)
     Txt(p, "t", p.name, ix + 16, y + h / 2, tcol, alpha, 17, 13, true)
 end
 
+-- The page list scrolls inside this band: it ends just above the footer separator line (user + ping)
+local SIDE_TOP, SIDE_BOT = 60, H - 58
 local function drawSidebar(hub)
-    local y, ty, th = 66, nil, nil
-    local ap = hub.alertPage                 -- page the unsaved-changes "!" leads to (Configs)
+    local sa = ani(hub, "side", hub.sideT or 0, 16)       -- animated scroll offset of the list
+    local y, ty, th = 66 - sa, nil, nil
+    CLIP0, CLIP1 = SIDE_TOP, SIDE_BOT
+    local ap = hub.alertPage                -- page the unsaved-changes "!" leads to (Configs)
     local apParentY, apParentE, apChildY, apTopY
     for ci, cat in ipairs(hub.cats) do
         if ci > 1 then y = y + 8 end
@@ -1932,10 +1937,48 @@ local function drawSidebar(hub)
         Txt(hub, "alt", "!", bx, by, WARN_INK, aa, 21, 10, true, "c")    -- a real "!" character, centred in the badge
     end
     if ty then
-        local hy = ani(hub, "hy", ty, 16)
+        -- the highlight is animated in list coordinates (so it does not lag while the list scrolls), then shifted
+        local hy = ani(hub, "hy", ty + sa, 16) - sa
         local hh = ani(hub, "hh", th, 16)
         Box2(hub, "hl", 8, hy, SW - 16, hh, mix(C.side, C.text, 0.07), mix(C.side, C.text, 0.15), 1, 14, 7)
         Rect(hub, "hlbar", 8, hy + hh / 2 - 7, 2.5, 14, C.accent, 1, 15, true, 1)
+    end
+    CLIP0, CLIP1 = nil, nil
+
+    -- scroll range: whatever does not fit between the top and the footer line
+    local maxS = max(0, (y + sa) + 6 - SIDE_BOT)
+    hub.sideMax = maxS
+    -- picking a page scrolls it into view
+    if hub.sideReveal and ty then
+        hub.sideReveal = nil
+        local rt, rb = ty + sa, ty + sa + th
+        local t = hub.sideT or 0
+        if rt - t < SIDE_TOP + 6 then t = rt - SIDE_TOP - 6 elseif rb - t > SIDE_BOT - 6 then t = rb - SIDE_BOT + 6 end
+        hub.sideT = t
+    end
+    hub.sideT = clamp(hub.sideT or 0, 0, maxS)
+
+    if maxS > 1 then
+        -- soft fades at the cut edges (same trick as the page content)
+        local fb = clamp((maxS - sa) / 24, 0, 1)
+        local ft = clamp(sa / 24, 0, 1)
+        for i = 0, 5 do
+            local a = (1 - i / 6) ^ 2 * 0.95
+            if fb > 0.01 then Rect(hub, 700 + i, 1, SIDE_BOT - (i + 1) * 4, SW - 1, 4, C.side, a * fb, 18, true, 0) end
+            if ft > 0.01 then Rect(hub, 800 + i, 1, SIDE_TOP + i * 4, SW - 1, 4, C.side, a * ft, 18, true, 0) end
+        end
+        -- thin scrollbar on the sidebar's right edge
+        local ty0, trackH = SIDE_TOP + 4, SIDE_BOT - SIDE_TOP - 8
+        local viewH = SIDE_BOT - SIDE_TOP
+        local thumbH = max(20, trackH * viewH / (viewH + maxS))
+        local thumbY = ty0 + (trackH - thumbH) * clamp(sa / maxS, 0, 1)
+        local hv = hot(SW - 12, ty0, 10, trackH)
+        if hv and M.pressed and not dragOwner then dragOwner = hub.sideBar end
+        if dragOwner == hub.sideBar then
+            if M.down then hub.sideT = clamp((M.y - ty0 - thumbH / 2) / (trackH - thumbH), 0, 1) * maxS else dragOwner = nil end
+        end
+        local sb_a = ani(hub, "sideBarA", (hv or dragOwner == hub.sideBar) and 1 or 0, 14)
+        Rect(hub, "sbt2", SW - 8 - sb_a, thumbY, 3 + 2 * sb_a, thumbH, C.accent, 0.35 + 0.5 * sb_a, 19, true, 2)
     end
 end
 
@@ -2401,6 +2444,10 @@ local function step(hub)
     if frameId % 120 == 0 then Camera = workspace.CurrentCamera or Camera end
     local vsz = Camera.ViewportSize
     VW, VH = vsz.X, vsz.Y
+    if hub.autoCenter and not hub.centered then
+        hub.pos[1], hub.pos[2] = floor((VW - W) / 2), floor((VH - H) / 2)
+        if hub.ready then hub.centered = true end        -- from now on the player owns the position (drag)
+    end
     PERF = hub:Get("perf_mode") == true
     hub.fps = lerp(hub.fps, 1 / DT, 0.05)
     stepTheme()
@@ -2500,6 +2547,19 @@ local function step(hub)
         if mp then hub.grabY = M.rawy end
         if md and hub.grabY then hub.scrollT = hub.scrollT - (M.rawy - hub.grabY); hub.grabY = M.rawy end
         hub.scrollT = clamp(hub.scrollT, 0, hub.maxScroll)
+    elseif ctxOK and active and not busy and M.x >= 0 and M.x <= SW and M.y > HDR and M.y < H and hub.sideMax > 0 then
+        -- same controls over the sidebar: they scroll the page list instead
+        local dn, up = key(0x28), key(0x26)
+        if dn then hub.sideT = hub.sideT + 360 * DT end
+        if up then hub.sideT = hub.sideT - 360 * DT end
+        local _, hm = key(0x24)
+        local _, en = key(0x23)
+        if hm then hub.sideT = 0 end
+        if en then hub.sideT = hub.sideMax end
+        local md, mp = key(0x04)
+        if mp then hub.grabY = M.rawy end
+        if md and hub.grabY then hub.sideT = hub.sideT - (M.rawy - hub.grabY); hub.grabY = M.rawy end
+        hub.sideT = clamp(hub.sideT, 0, hub.sideMax)
     end
 
     -- window dragging
@@ -2567,7 +2627,15 @@ function Lime.Create(opts)
     hub.version = opts.Version or VERSION
     hub.logoUrl = opts.LogoUrl
     if opts.IconBase then IMG_BASE = opts.IconBase end          -- folder that holds the icon PNGs
-    hub.pos = opts.Position or { 60, 40 }
+    hub.sideBar, hub.sideT, hub.sideMax = {}, 0, 0                    -- sidebar list scroll
+    if opts.Position then
+        hub.pos = opts.Position
+    else
+        -- no position given: centre the window on screen (re-centred until the menu first opens, see step())
+        local vs = Camera.ViewportSize
+        hub.pos = { floor((vs.X - W) / 2), floor((vs.Y - H) / 2) }
+        hub.autoCenter = true
+    end
     hub.pages, hub.cats, hub.items, hub.bindList, hub.toasts = {}, {}, {}, {}, {}
     hub.colorItems = {}
     hub.tags = {}
@@ -2677,7 +2745,11 @@ local function hookWheel(hub)
         UIS.InputChanged:Connect(function(input)
             if hub.dead then return end
             if input.UserInputType == Enum.UserInputType.MouseWheel and hub.open then
-                hub.scrollT = clamp(hub.scrollT - input.Position.Z * 48, 0, hub.maxScroll)
+                if M.x >= 0 and M.x <= SW and M.y > HDR then        -- pointer over the sidebar: scroll the page list
+                    hub.sideT = clamp(hub.sideT - input.Position.Z * 40, 0, hub.sideMax)
+                else
+                    hub.scrollT = clamp(hub.scrollT - input.Position.Z * 48, 0, hub.maxScroll)
+                end
             end
         end)
     end)
