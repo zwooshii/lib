@@ -1,4 +1,21 @@
+--[[
+    fzzr UI library  |  Matcha LuaVM  |  Drawing API only
+    ---------------------------------------------------------------------
+    Load it from your script:
 
+        loadstring(httpget("https://raw.githubusercontent.com/<you>/<repo>/main/fzzr.lua"))()
+        local Fzzr = _G.Fzzr                      -- Matcha drops loadstring return values, so it is exported here
+
+    Then:  Fzzr:CreateWindow({...})  ->  Window:AddPage  ->  page:AddBox  ->  box:AddSwitch / AddSlider / ...  ->  Window:Init()
+    Full documentation and an example script: see README.md and example.lua in the repository.
+
+    Naming: nothing here reuses Matcha's own menu API names (UI, AddTab, Section, Toggle, Keybind,
+    SliderInt, SliderFloat, Combo, Button, ColorPicker, InputText, Text, Tip, Spacing).
+
+    Design: immediate-mode drawing on a pooled set of Drawing objects. Every drawing is created once, cached,
+    and only touched when a property changes. Everything not drawn in a frame is hidden by a sweep at frame end.
+    The "Common" tab (Settings: Configs / Display / Notifications, and Players) is built in and always last.
+]]
 if _G.__FzzrHub then pcall(function() _G.__FzzrHub:Destroy() end) end
 
 local Players = game:GetService("Players")
@@ -390,7 +407,7 @@ local function focusText(o) TI.owner = o; TI.bs = 0; primeKeys() end
 --========================================================================
 -- Icons (primitives only)
 --========================================================================
-local IMG_BASE = "https://raw.githubusercontent.com/zwooshii/imagemix/main/"
+local IMG_BASE = "https://raw.githubusercontent.com/zwooshii/lib/main/assets/flaticons/"
 local ICONFILE = { crosshair = "Crosshair", brush = "Sword", mountain = "World", blade = "Slash",
     bolt = "Bolt", gear = "Cog", user = "Profile" }
 local ICONDATA = {}                              -- file name -> raw PNG bytes (filled by the loader)
@@ -1892,7 +1909,7 @@ end
 local VERSION = "1.0.0"
 local LOGO_W, LOGO_H = 64, 34          -- the logo is fitted inside this box, keeping its own aspect ratio
 local AVATAR_DATA                      -- raw PNG bytes of the local player's headshot, set once downloaded
-local LOGO_FILES = { "fzzr.png", "Fzzr.png", "FZZR.png" }   -- tried in order under IMG_BASE
+local LOGO_FILES = { "fzzr.png", "Fzzr.png", "FZZR.png", "logo.png", "Logo.png", "fzzr_logo.png", "fzzr-logo.png", "FzzrLogo.png" }   -- tried in order under IMG_BASE
 local LOGO_DATA                        -- raw PNG bytes, set once downloaded
 local LOGO_DW, LOGO_DH = LOGO_W, LOGO_H
 local function setLogo(data)
@@ -2382,9 +2399,14 @@ function Lime:LoadIcons()
         local urls = {}
         if self.logoUrl then urls[1] = self.logoUrl
         else for _, nm in ipairs(LOGO_FILES) do urls[#urls + 1] = IMG_BASE .. nm end end
+        local logoOK = false
         for _, u in ipairs(urls) do
             local d = fetchPng(u)
-            if d then setLogo(d); break end
+            if d then setLogo(d); logoOK = true; break end
+        end
+        if not logoOK then
+            warn("[fzzr] logo not found. Tried: " .. table.concat(urls, "  |  ") ..
+                "  -- set CreateWindow({ LogoUrl = \"<direct raw link to the png>\" }) to fix it")
         end
         t:Set(1)
         local okA, av = pcall(fetchAvatar, LocalPlayer.UserId)
