@@ -2628,7 +2628,8 @@ function Lime.Create(opts)
     hub.logoUrl = opts.LogoUrl
     if opts.IconBase then IMG_BASE = opts.IconBase end          -- folder that holds the icon PNGs
     hub.sideBar, hub.sideT, hub.sideMax = {}, 0, 0                    -- sidebar list scroll
-    if opts.Position then
+    -- the window is centred by default; Position is only used when Center = false is passed as well
+    if opts.Position and opts.Center == false then
         hub.pos = opts.Position
     else
         -- no position given: centre the window on screen (re-centred until the menu first opens, see step())
