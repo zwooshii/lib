@@ -42,6 +42,7 @@ local dragOwner = nil
 local ctxOK = true                           -- whether widgets currently receive input
 local TIPC = nil                             -- row (with a .tip) the mouse is over this frame
 local PERF = false                           -- Performance Mode: no shadow / glow / blur / animations
+local VW, VH = 1920, 1080                    -- viewport size, read once per frame in step()
 local M = { x = 0, y = 0, rawx = 0, rawy = 0, down = false, pressed = false }
 
 --========================================================================
@@ -53,6 +54,7 @@ local function rgb(r, g, b) return { r / 255, g / 255, b / 255 } end
 
 local WARN = rgb(255, 159, 64)     -- orange used for the "unsaved changes" markers
 local WARN_INK = rgb(36, 20, 6)    -- dark colour of the "!" drawn on top of the orange badge
+local RED = rgb(255, 77, 77)         -- bad ping / low FPS (was a new table every frame)
 
 -- Look of the header pills (build tags, FPS, ping, config chip). Override with CreateWindow({ TagStyle = {...} }).
 -- If the text looks off-centre, nudge widthScale (a bit up = more room for the text).
@@ -85,22 +87,58 @@ end
 
 local NARROW = {}
 for ch in (" ijltfrI.,:;|!'[]()"):gmatch(".") do NARROW[ch] = true end
-local function tw(s, size)
-    local w = 0
-    for i = 1, #s do
-        local ch, b = s:sub(i, i), s:byte(i)
-        if NARROW[ch] then w = w + 0.33
-        elseif ch == "m" or ch == "w" or ch == "M" or ch == "W" then w = w + 0.86
-        elseif b >= 65 and b <= 90 then w = w + 0.64
-        elseif b >= 128 then w = w + 0.3
-        else w = w + 0.56 end
-    end
-    return w * size
+-- per-byte width table (same widths as before, one lookup per character instead of sub + byte + compares)
+local WTAB = {}
+for b = 0, 255 do
+    local ch = string.char(b)
+    if NARROW[ch] then WTAB[b] = 0.33
+    elseif ch == "m" or ch == "w" or ch == "M" or ch == "W" then WTAB[b] = 0.86
+    elseif b >= 65 and b <= 90 then WTAB[b] = 0.64
+    elseif b >= 128 then WTAB[b] = 0.3
+    else WTAB[b] = 0.56 end
 end
+-- tw / fit are memoised per (size, string): the same labels are measured every frame. The caches are bounded.
+local TWC, TWN = {}, 0
+local function tw(s, size)
+    local bySize = TWC[size]
+    if not bySize then bySize = {}; TWC[size] = bySize end
+    local v = bySize[s]
+    if v then return v end
+    local w = 0
+    for i = 1, #s do w = w + WTAB[s:byte(i)] end
+    v = w * size
+    TWN = TWN + 1
+    if TWN > 600 then TWC, TWN = {}, 0; bySize = {}; TWC[size] = bySize end
+    bySize[s] = v
+    return v
+end
+local FITC, FITN = {}, 0
 local function fit(s, maxw, size)
-    if tw(s, size) <= maxw then return s end
-    while #s > 1 and tw(s .. "...", size) > maxw do s = s:sub(1, #s - 1) end
-    return s .. "..."
+    local a = FITC[maxw]
+    if not a then a = {}; FITC[maxw] = a end
+    local b = a[size]
+    if not b then b = {}; a[size] = b end
+    local hit = b[s]
+    if hit then return hit end
+    local out = s
+    if tw(s, size) > maxw then
+        local cut = s
+        while #cut > 1 and tw(cut .. "...", size) > maxw do cut = cut:sub(1, #cut - 1) end
+        out = cut .. "..."
+    end
+    FITN = FITN + 1
+    if FITN > 400 then FITC, FITN = {}, 0; a = {}; FITC[maxw] = a; b = {}; a[size] = b end
+    b[s] = out
+    return out
+end
+-- cached "<prefix><number>" draw keys (building them with .. every frame converts the number each time)
+local KCACHE = {}
+local function kk(p, i)
+    local a = KCACHE[p]
+    if not a then a = {}; KCACHE[p] = a end
+    local s = a[i]
+    if not s then s = p .. i; a[i] = s end
+    return s
 end
 local function wrap(text, maxw, size)
     local lines, line = {}, ""
@@ -181,16 +219,21 @@ stepTheme()
 -- Pooled drawing
 --========================================================================
 local pool, deadCount = {}, 0
+local shownList, shownN = {}, 0      -- only the drawings that are currently visible: the sweep never walks the whole pool
+local KINDN, liveN = {}, 0           -- live drawings per type (Debug page)
+local WR = 0                         -- property writes that reached the Drawing layer (Debug page)
 
 local function get(o, key, kind)
     local ds = o.__d
     if not ds then ds = {}; o.__d = ds end
     local d = ds[key]
     if not d then
-        d = { obj = Drawing.new(kind), shown = false, seen = 0, c = {} }
+        d = { obj = Drawing.new(kind), shown = false, seen = 0, c = {}, kind = kind }
         d.obj.Visible = false
         ds[key] = d
         pool[#pool + 1] = d
+        KINDN[kind] = (KINDN[kind] or 0) + 1
+        liveN = liveN + 1
     end
     d.seen = frameId
     return d
@@ -201,6 +244,8 @@ local function release(o)
         for _, d in pairs(o.__d) do
             pcall(function() d.obj:Remove() end)
             d.dead = true; d.shown = false; deadCount = deadCount + 1
+            KINDN[d.kind] = (KINDN[d.kind] or 1) - 1
+            liveN = liveN - 1
         end
         o.__d = nil
     end
@@ -212,24 +257,40 @@ local function sweep()
         for i = 1, #pool do if not pool[i].dead then np[#np + 1] = pool[i] end end
         pool = np; deadCount = 0
     end
-    for i = 1, #pool do
-        local d = pool[i]
-        if d.shown and d.seen ~= frameId then d.obj.Visible = false; d.shown = false end
+    -- hide whatever was not drawn this frame and compact the list of visible drawings in the same pass
+    local n = 0
+    for i = 1, shownN do
+        local d = shownList[i]
+        if not d.dead then
+            if d.seen ~= frameId then
+                d.obj.Visible = false; d.shown = false
+            else
+                n = n + 1; shownList[n] = d
+            end
+        end
     end
+    for i = n + 1, shownN do shownList[i] = nil end
+    shownN = n
 end
 
 local function set(d, k, v)
     local c = d.c
-    if c[k] ~= v then c[k] = v; d.obj[k] = v end
+    if c[k] ~= v then c[k] = v; d.obj[k] = v; WR = WR + 1 end
 end
 local function setcol(d, col)
     local c, r, g, b = d.c, col[1], col[2], col[3]
     if c.r ~= r or c.g ~= g or c.b ~= b then
         c.r = r; c.g = g; c.b = b
         d.obj.Color = Color3.new(r, g, b)
+        WR = WR + 1
     end
 end
-local function show(d) if not d.shown then d.obj.Visible = true; d.shown = true end end
+local function show(d)
+    if not d.shown then
+        d.obj.Visible = true; d.shown = true
+        shownN = shownN + 1; shownList[shownN] = d
+    end
+end
 local function px(x) return floor(OX + x + 0.5) end
 local function py(y) return floor(OY + y + 0.5) end
 
@@ -245,8 +306,8 @@ local function Rect(o, key, x, y, w, h, col, a, z, filled, corner, thick)
     local d = get(o, key, "Square")
     local c, obj = d.c, d.obj
     local X, Y, SX, SY = px(x), py(y), floor(w + 0.5), floor(h + 0.5)
-    if c.px ~= X or c.py ~= Y then c.px = X; c.py = Y; obj.Position = Vector2.new(X, Y) end
-    if c.sx ~= SX or c.sy ~= SY then c.sx = SX; c.sy = SY; obj.Size = Vector2.new(SX, SY) end
+    if c.px ~= X or c.py ~= Y then c.px = X; c.py = Y; obj.Position = Vector2.new(X, Y); WR = WR + 1 end
+    if c.sx ~= SX or c.sy ~= SY then c.sx = SX; c.sy = SY; obj.Size = Vector2.new(SX, SY); WR = WR + 1 end
     setcol(d, col)
     set(d, "Transparency", floor(a * 100 + 0.5) / 100)
     set(d, "ZIndex", z)
@@ -292,7 +353,7 @@ local function Txt(o, key, s, x, cy, col, a, z, size, bold, align)
     end
     local c, obj = d.c, d.obj
     local X, Y = px(x), py(cy - size / 2 - 1)
-    if c.px ~= X or c.py ~= Y then c.px = X; c.py = Y; obj.Position = Vector2.new(X, Y) end
+    if c.px ~= X or c.py ~= Y then c.px = X; c.py = Y; obj.Position = Vector2.new(X, Y); WR = WR + 1 end
     set(d, "Text", s)
     setcol(d, col)
     set(d, "Transparency", floor(a * 100 + 0.5) / 100)
@@ -312,8 +373,8 @@ local function Ln(o, key, x1, y1, x2, y2, col, a, z, th)
     local d = get(o, key, "Line")
     local c, obj = d.c, d.obj
     local ax, ay, bx, by = px(x1), py(y1), px(x2), py(y2)
-    if c.ax ~= ax or c.ay ~= ay then c.ax = ax; c.ay = ay; obj.From = Vector2.new(ax, ay) end
-    if c.bx ~= bx or c.by ~= by then c.bx = bx; c.by = by; obj.To = Vector2.new(bx, by) end
+    if c.ax ~= ax or c.ay ~= ay then c.ax = ax; c.ay = ay; obj.From = Vector2.new(ax, ay); WR = WR + 1 end
+    if c.bx ~= bx or c.by ~= by then c.bx = bx; c.by = by; obj.To = Vector2.new(bx, by); WR = WR + 1 end
     setcol(d, col)
     set(d, "Transparency", floor(a * 100 + 0.5) / 100)
     set(d, "ZIndex", z)
@@ -328,7 +389,7 @@ local function Circ(o, key, x, y, r, col, a, z, filled, th)
     local d = get(o, key, "Circle")
     local c, obj = d.c, d.obj
     local X, Y = px(x), py(y)
-    if c.px ~= X or c.py ~= Y then c.px = X; c.py = Y; obj.Position = Vector2.new(X, Y) end
+    if c.px ~= X or c.py ~= Y then c.px = X; c.py = Y; obj.Position = Vector2.new(X, Y); WR = WR + 1 end
     set(d, "Radius", r)
     set(d, "NumSides", r > 8 and 40 or 24)
     setcol(d, col)
@@ -359,12 +420,19 @@ end
 --========================================================================
 -- Animation + input helpers
 --========================================================================
+-- blend factor 1 - exp(-speed * DT), computed once per speed per frame (there are only a handful of distinct speeds)
+local ANIK, ANIF = {}, {}
 local function ani(o, key, target, speed)
     local a = o.__a
     if not a then a = {}; o.__a = a end
     local v = a[key]
     if v == nil or PERF then a[key] = target; return target end     -- Performance Mode: every animation snaps
-    v = v + (target - v) * (1 - exp(-(speed or 14) * DT))
+    if v == target then return v end                                 -- settled: nothing to compute (most calls)
+    speed = speed or 14
+    local f
+    if ANIF[speed] == frameId then f = ANIK[speed]
+    else f = 1 - exp(-speed * DT); ANIK[speed] = f; ANIF[speed] = frameId end
+    v = v + (target - v) * f
     if abs(v - target) < 0.001 then v = target end
     a[key] = v
     return v
@@ -437,7 +505,7 @@ local function Pic(o, k, data, cx, cy, s, col, a, z)
     local sz = floor(s + 0.5)
     if c.sz ~= sz then c.sz = sz; obj.Size = Vector2.new(sz, sz) end
     local X, Y = px(cx - s / 2), py(cy - s / 2)
-    if c.px ~= X or c.py ~= Y then c.px = X; c.py = Y; obj.Position = Vector2.new(X, Y) end
+    if c.px ~= X or c.py ~= Y then c.px = X; c.py = Y; obj.Position = Vector2.new(X, Y); WR = WR + 1 end
     setcol(d, col)
     -- the glyphs are light grey, so dim states are also shown through transparency
     set(d, "Transparency", floor(a * (0.4 + 0.6 * min(1, col[1] / 0.9)) * 100 + 0.5) / 100)
@@ -616,17 +684,17 @@ local function dropContent(p, x, y, z)
     for i, name in ipairs(w.items) do
         local ry = y + 4 + (i - 1) * 24
         local hv = hot(x + 3, ry, p.w - 6, 24)
-        local ha = ani(p, "h" .. i, hv and 1 or 0, 20)
+        local ha = ani(p, kk("h", i), hv and 1 or 0, 20)
         local sel = w.multi and w.set[name] or (not w.multi and w.value == i)
-        local sa = ani(p, "s" .. i, sel and 1 or 0, 16)
-        if ha > 0.01 then Rect(p, "hv" .. i, x + 3, ry, p.w - 6, 24, C.hover, ha, z, true, 5) end
+        local sa = ani(p, kk("s", i), sel and 1 or 0, 16)
+        if ha > 0.01 then Rect(p, kk("hv", i), x + 3, ry, p.w - 6, 24, C.hover, ha, z, true, 5) end
         if w.multi then
-            Box2(p, "cb" .. i, x + 10, ry + 5, 14, 14, mix(C.bg, C.accent, sa), mix(C.border, C.accent, sa), 1, z + 1, 4)
-            if sa > 0.05 then Icon(p, "ck" .. i, "check", x + 17, ry + 12, 12, C.onacc, sa, z + 4) end
-            Txt(p, "t" .. i, name, x + 32, ry + 12, C.text, 1, z + 2, 12.5, true)
+            Box2(p, kk("cb", i), x + 10, ry + 5, 14, 14, mix(C.bg, C.accent, sa), mix(C.border, C.accent, sa), 1, z + 1, 4)
+            if sa > 0.05 then Icon(p, kk("ck", i), "check", x + 17, ry + 12, 12, C.onacc, sa, z + 4) end
+            Txt(p, kk("t", i), name, x + 32, ry + 12, C.text, 1, z + 2, 12.5, true)
         else
-            if sa > 0.01 then Rect(p, "bar" .. i, x + 5, ry + 5, 2.5, 14, C.accent, sa, z + 1, true, 1) end
-            Txt(p, "t" .. i, name, x + 16 + 2 * sa, ry + 12, C.text, 1, z + 2, 12.5, true)
+            if sa > 0.01 then Rect(p, kk("bar", i), x + 5, ry + 5, 2.5, 14, C.accent, sa, z + 1, true, 1) end
+            Txt(p, kk("t", i), name, x + 16 + 2 * sa, ry + 12, C.text, 1, z + 2, 12.5, true)
         end
         if hv and M.pressed and p.born ~= frameId then
             w:pick(i)
@@ -819,7 +887,10 @@ do
         local by = ay2 + 24
         Txt(p, "hxl", "Hex", x + 12, by + 11, C.dim, 1, z, 11.5, true)
         Box2(p, "hxb", x + 48, by, p.w - 60, 22, C.bg, C.border, 1, z, 5)
-        Txt(p, "hxt", string.format("#%02X%02X%02X%02X", b255(col[1]), b255(col[2]), b255(col[3]), b255(w.alpha)),
+        local r8, g8, b8, a8 = b255(col[1]), b255(col[2]), b255(col[3]), b255(w.alpha)
+        local hexKey = ((r8 * 256 + g8) * 256 + b8) * 256 + a8
+        if p.hexKey ~= hexKey then p.hexKey = hexKey; p.hexTxt = string.format("#%02X%02X%02X%02X", r8, g8, b8, a8) end
+        Txt(p, "hxt", p.hexTxt,
             x + 58, by + 11, C.text, 1, z + 2, 12, false)
         local ry = by + 30
         Txt(p, "rgl", "RGB", x + 12, ry + 11, C.dim, 1, z, 11.5, true)
@@ -827,8 +898,8 @@ do
         for i = 1, 4 do
             local v = (i == 4) and b255(w.alpha) or b255(col[i])
             local bx = x + 48 + (i - 1) * (bw4 + 4)
-            Box2(p, "rb" .. i, bx, ry, bw4, 22, C.bg, C.border, 1, z, 5)
-            Txt(p, "rt" .. i, tostring(v), bx + bw4 / 2, ry + 11, C.text, 1, z + 2, 11.5, false, "c")
+            Box2(p, kk("rb", i), bx, ry, bw4, 22, C.bg, C.border, 1, z, 5)
+            Txt(p, kk("rt", i), kk("", v), bx + bw4 / 2, ry + 11, C.text, 1, z + 2, 11.5, false, "c")
         end
 
         -- Advanced side panel (Animation + Speed), reuses the normal widgets
@@ -856,7 +927,7 @@ do
 end
 
 local Kinds = {}
-for _, k in ipairs({ "switch", "slider", "choice", "multi", "popover", "keypill", "entry", "buttons", "themes", "caption", "chip", "chips", "tabs", "preview", "plist", "notice" }) do
+for _, k in ipairs({ "switch", "slider", "choice", "multi", "popover", "keypill", "entry", "buttons", "themes", "caption", "chip", "chips", "tabs", "preview", "plist", "notice", "stats" }) do
     Kinds[k] = {}
     Kinds[k].mt = { __index = Kinds[k] }
 end
@@ -885,7 +956,7 @@ function Kinds.switch.draw(w, x, y, wd, z)
         local ha = ani(w, "bdh", bh and 1 or 0, 14)
         Rect(w, "bdbg", bx, cy - 10, 22, 20, C.hover, ha, z, true, 5)
         local col = mix(C.dim, C.text, ha)
-        for i = -1, 1 do Circ(w, "bd" .. i, bx + 11 + i * 5, cy, 1.5, col, 1, z + 2, true) end
+        for i = -1, 1 do Circ(w, kk("bd", i), bx + 11 + i * 5, cy, 1.5, col, 1, z + 2, true) end
         if bh and M.pressed then
             if w.hasMore then openSubPop(w, bx + 22 - w.pw, cy + 12) else openBindPop(w, bx, cy + 10) end
         end
@@ -907,7 +978,16 @@ function Kinds.slider.draw(w, x, y, wd, z)
     end
     local v = w.value
     local isOff = w.zeroText and v <= w.min
-    local txt = isOff and w.zeroText or string.format("%." .. (w.dec or 0) .. "f%s", v, w.suffix or "")
+    local txt
+    if isOff then txt = w.zeroText
+    else
+        -- the value text only changes when the value does: format it once, not every frame
+        if w.fmtV ~= v then
+            w.fmtV = v
+            w.fmtT = string.format("%." .. (w.dec or 0) .. "f%s", v, w.suffix or "")
+        end
+        txt = w.fmtT
+    end
     local pw = max(46, tw(txt, 11.5) + 14)
     local px_ = x + wd - pw
     local phv = hot(px_, cy - 9, pw, 18)
@@ -995,8 +1075,8 @@ function Kinds.popover.draw(w, x, y, wd, z)
     local col = mix(C.dim, C.accent, max(oa, ha))
     for i = 0, 1 do
         local ox_ = bx + bw / 2 - 3 + i * 5
-        Ln(w, "a" .. i, ox_ - 1.5, cy - 3.5, ox_ + 1.5, cy, col, 1, z + 2, 1.5)
-        Ln(w, "b" .. i, ox_ + 1.5, cy, ox_ - 1.5, cy + 3.5, col, 1, z + 2, 1.5)
+        Ln(w, kk("a", i), ox_ - 1.5, cy - 3.5, ox_ + 1.5, cy, col, 1, z + 2, 1.5)
+        Ln(w, kk("b", i), ox_ + 1.5, cy, ox_ - 1.5, cy + 3.5, col, 1, z + 2, 1.5)
     end
     if hv and M.pressed then openSubPop(w, bx + bw + 8, cy - 16) end
 end
@@ -1047,10 +1127,10 @@ function Kinds.buttons.draw(w, x, y, wd, z)
         local b = w.list[idx]
         if b.full then
             if col ~= 0 then col = 0; ry = ry + rh + gap end
-            if Button(w, "b" .. idx, x, ry, wd, rh, b[1], z) and b[2] then b[2]() end
+            if Button(w, kk("b", idx), x, ry, wd, rh, b[1], z) and b[2] then b[2]() end
             ry = ry + rh + gap
         else
-            if Button(w, "b" .. idx, x + col * (colw + gap), ry, colw, rh, b[1], z) and b[2] then b[2]() end
+            if Button(w, kk("b", idx), x + col * (colw + gap), ry, colw, rh, b[1], z) and b[2] then b[2]() end
             col = col + 1
             if col == 2 then col = 0; ry = ry + rh + gap end
         end
@@ -1076,14 +1156,14 @@ function Kinds.themes.draw(w, x, y, wd, z)
     for i, t in ipairs(THEMES) do
         local ry = ly + 4 + (i - 1) * 22
         local hv = hot(x + 3, ry, wd - 6, 22)
-        local ha = ani(w, "h" .. i, hv and 1 or 0, 14)
+        local ha = ani(w, kk("h", i), hv and 1 or 0, 14)
         if hv and M.pressed then w:Set(i) end
         local sel = (w.value == i)
-        local sa = ani(w, "s" .. i, sel and 1 or 0, 14)
-        if ha > 0.02 and not sel then Rect(w, "hv" .. i, x + 3, ry, wd - 6, 22, C.hover, ha, z + 1, true, 4) end
-        Txt(w, "t" .. i, t.name, x + 14 + 14 * sa, ry + 11, mix(C.dim, C.text, max(sa, ha)), 1, z + 4, 12, sel)
+        local sa = ani(w, kk("s", i), sel and 1 or 0, 14)
+        if ha > 0.02 and not sel then Rect(w, kk("hv", i), x + 3, ry, wd - 6, 22, C.hover, ha, z + 1, true, 4) end
+        Txt(w, kk("t", i), t.name, x + 14 + 14 * sa, ry + 11, mix(C.dim, C.text, max(sa, ha)), 1, z + 4, 12, sel)
         if sa > 0.02 then
-            Tri(w, "ar" .. i, x + 13, ry + 7, x + 13, ry + 15, x + 20, ry + 11, C.accent, sa, z + 4)
+            Tri(w, kk("ar", i), x + 13, ry + 7, x + 13, ry + 15, x + 20, ry + 11, C.accent, sa, z + 4)
         end
     end
 end
@@ -1103,6 +1183,20 @@ function Kinds.notice.draw(w, x, y, wd, z)
     end
 end
 
+-- Stats: live label / value readout. rows = { { label, value, colour? }, ... } is refreshed by Lime:DebugTick ------
+function Kinds.stats.measure(w, wd)
+    w.h = max(1, #w.rows) * 18 + 8
+end
+function Kinds.stats.draw(w, x, y, wd, z)
+    local rows = w.rows
+    for i = 1, #rows do
+        local r = rows[i]
+        local cy = y + 4 + (i - 0.5) * 18
+        Txt(w, kk("l", i), r[1], x, cy, C.dim, 1, z, 12, false)
+        Txt(w, kk("v", i), r[2], x + wd, cy, r[3] or C.text, 1, z, 12, true, "r")
+    end
+end
+
 -- Caption --------------------------------------------------------------
 function Kinds.caption.measure(w, wd)
     if w.wrapW ~= wd then
@@ -1112,7 +1206,9 @@ function Kinds.caption.measure(w, wd)
     end
 end
 function Kinds.caption.draw(w, x, y, wd, z)
-    for i, l in ipairs(w.lines or {}) do Txt(w, "c" .. i, l, x, y + 8 + (i - 1) * 16, C.dim, 1, z, 12, false) end
+    local lines = w.lines
+    if not lines then return end
+    for i = 1, #lines do Txt(w, kk("c", i), lines[i], x, y + 8 + (i - 1) * 16, C.dim, 1, z, 12, false) end
 end
 
 --========================================================================
@@ -1132,8 +1228,8 @@ function Kinds.preview.draw(w, x, y, wd, z)
     local hub = w.hub
     local ph = w.h - 6
     Box2(w, "bg", x, y, wd, ph, C.bg, C.border, 1, z, 6)
-    for i = 1, floor(wd / 22) do Ln(w, "gv" .. i, x + i * 22, y + 2, x + i * 22, y + ph - 2, C.border, 0.35, z + 2, 1) end
-    for i = 1, floor(ph / 22) do Ln(w, "gh" .. i, x + 2, y + i * 22, x + wd - 2, y + i * 22, C.border, 0.35, z + 2, 1) end
+    for i = 1, floor(wd / 22) do Ln(w, kk("gv", i), x + i * 22, y + 2, x + i * 22, y + ph - 2, C.border, 0.35, z + 2, 1) end
+    for i = 1, floor(ph / 22) do Ln(w, kk("gh", i), x + 2, y + i * 22, x + wd - 2, y + i * 22, C.border, 0.35, z + 2, 1) end
     local cx = x + wd / 2
     local rot = 0
     if hub:Get("pv_rotate") then rot = tick() * (hub:Get("pv_speed") or 50) * math.pi / 180 end
@@ -1177,7 +1273,7 @@ function Kinds.chip.draw(w, x, y, cw, z)
     local dh = hot(dx, y, 24, ch)
     local da = ani(w, "dh", dh and 1 or 0, 14)
     local dcol = mix(tcol, C.text, da * 0.6)
-    for i = -1, 1 do Circ(w, "d" .. i, dx + 12 + i * 4.5, y + ch / 2, 1.4, dcol, 1, z + 3, true) end
+    for i = -1, 1 do Circ(w, kk("d", i), dx + 12 + i * 4.5, y + ch / 2, 1.4, dcol, 1, z + 3, true) end
     if dh and M.pressed then openSubPop(w, dx + 24 - w.pw, y + ch + 4) end
 end
 function Kinds.chips.draw(w, x, y, wd, z)
@@ -1198,10 +1294,10 @@ function Kinds.plist.draw(w, x, y, wd, z)
     for i, name in ipairs(w.order) do
         local ry = ly + 4 + (i - 1) * rh
         local hv = hot(x + 3, ry, wd - 6, rh)
-        local ha = ani(w, "h" .. i, hv and 1 or 0, 14)
-        if ha > 0.02 then Rect(w, "hv" .. i, x + 3, ry, wd - 6, rh, C.hover, ha, z + 1, true, 4) end
-        Txt(w, "n" .. i, tostring(i), x + 12, ry + rh / 2, C.dim, 1, z + 2, 11.5, true)
-        Txt(w, "t" .. i, name, x + 30, ry + rh / 2, C.text, 1, z + 2, 12, false)
+        local ha = ani(w, kk("h", i), hv and 1 or 0, 14)
+        if ha > 0.02 then Rect(w, kk("hv", i), x + 3, ry, wd - 6, rh, C.hover, ha, z + 1, true, 4) end
+        Txt(w, kk("n", i), kk("", i), x + 12, ry + rh / 2, C.dim, 1, z + 2, 11.5, true)
+        Txt(w, kk("t", i), name, x + 30, ry + rh / 2, C.text, 1, z + 2, 12, false)
         if hv and M.pressed and i > 1 then
             w.order[i], w.order[i - 1] = w.order[i - 1], w.order[i]
             if w.callback then w.callback(w.order) end
@@ -1293,6 +1389,8 @@ end
 function BoxAPI:Caption(text) return addRow(self, newItem("caption", { text = text, h = 24 })) end
 -- status line that reads hub.dirty: orange "!  Unsaved changes" or a dim "All changes saved"
 function BoxAPI:Notice() return addRow(self, newItem("notice", { h = 28 })) end
+-- live readout rows (used by the Debug page; scripts can add their own and fill w.rows)
+function BoxAPI:Stats() return addRow(self, newItem("stats", { rows = {}, h = 26 })) end
 
 function BoxAPI:Tabs(id, opts, default, callback)
     return addRow(self, newItem("tabs", { id = id, opts = opts, value = default or 1, callback = callback, h = 34 }))
@@ -1348,7 +1446,11 @@ function Lime:Page(name, opts)
     else
         local cat
         for _, c in ipairs(self.cats) do if c.name == opts.category then cat = c end end
-        if not cat then cat = { name = opts.category or "Other", pages = {} }; self.cats[#self.cats + 1] = cat end
+        if not cat then
+            local cname = opts.category or "Other"
+            cat = { name = cname, upper = string.upper(cname), pages = {} }
+            self.cats[#self.cats + 1] = cat
+        end
         cat.pages[#cat.pages + 1] = p
     end
     self.pages[#self.pages + 1] = p
@@ -1411,9 +1513,16 @@ local function numStr(v) return string.format("%.5g", v) end
 
 -- the whole state as text, sorted so equal states give equal text (forCompare skips animated colours)
 function Lime:Serialize(forCompare)
-    local ids = {}
-    for id in pairs(self.items) do if not CFG_SKIP[id] then ids[#ids + 1] = id end end
-    table.sort(ids)
+    -- the sorted id list only changes when items are added, so it is built once and reused
+    local ids = self.sortedIds
+    local count = 0
+    for _ in pairs(self.items) do count = count + 1 end
+    if not ids or self.sortedCount ~= count then
+        ids = {}
+        for id in pairs(self.items) do if not CFG_SKIP[id] then ids[#ids + 1] = id end end
+        table.sort(ids)
+        self.sortedIds, self.sortedCount = ids, count
+    end
     local out = {}
     for _, id in ipairs(ids) do
         local w = self.items[id]
@@ -1607,13 +1716,96 @@ function Lime:Destroy()
     self.dead = true
     if self.conn then self.conn:Disconnect(); self.conn = nil end
     for i = 1, #pool do pcall(function() pool[i].obj:Remove() end) end
-    pool = {}
+    pool, shownList, shownN, KINDN, liveN, deadCount = {}, {}, 0, {}, 0, 0
     if _G.__FzzrHub == self then _G.__FzzrHub = nil end
 end
 
 --========================================================================
 -- Frame drawing
 --========================================================================
+--========================================================================
+-- Debug: live performance readout (Common > Debug). Costs nothing unless that page is open.
+--========================================================================
+-- Scripts can add their own lines:  Window:DebugStat("Panels", function() return "12 drawings" end)
+function Lime:DebugStat(name, fn)
+    for _, e in ipairs(self.dbgExt) do if e[1] == name then e[2] = fn; return end end
+    self.dbgExt[#self.dbgExt + 1] = { name, fn }
+end
+
+local function setRow(rows, i, label, value, col)
+    local r = rows[i]
+    if not r then r = {}; rows[i] = r end
+    r[1], r[2], r[3] = label, value, col
+end
+local function trimRows(rows, n) for i = #rows, n + 1, -1 do rows[i] = nil end end
+local DBG_KINDS = { "Square", "Text", "Circle", "Line", "Triangle", "Image" }
+
+-- rebuilds the three readouts at most 4 times a second
+function Lime:DebugTick(now)
+    local prev = self.dbgAt
+    if prev and now - prev < 0.25 then return end
+    local span = prev and (now - prev) or 0.25
+    self.dbgAt = now
+
+    -- Lua memory + how much garbage is being created per second (sum of the increases between samples)
+    local okm, kb = pcall(collectgarbage, "count")
+    if okm and type(kb) == "number" then
+        if self.dbgKb and kb > self.dbgKb then self.dbgAlloc = (self.dbgAlloc or 0) + (kb - self.dbgKb) end
+        self.dbgKb = kb
+        self.dbgWin = (self.dbgWin or 0) + span
+        if self.dbgWin >= 1 then
+            self.dbgRate = (self.dbgAlloc or 0) / self.dbgWin
+            self.dbgAlloc, self.dbgWin = 0, 0
+        end
+    end
+
+    local ms = self.frameMs
+    local msCol = ms < 3 and C.accent or (ms < 6 and WARN or RED)
+    local fpsCol = self.fps >= 50 and C.accent or (self.fps >= 30 and WARN or RED)
+    local n = 0
+    local rows = self.dbgPerf.rows
+    n = n + 1; setRow(rows, n, "FPS", string.format("%d", floor(self.fps + 0.5)), fpsCol)
+    n = n + 1; setRow(rows, n, "Script time / frame", string.format("%.2f ms  (peak %.2f)", ms, self.peakMs), msCol)
+    n = n + 1; setRow(rows, n, "Drawings visible", shownN .. " / " .. liveN)
+    n = n + 1; setRow(rows, n, "Property writes / frame", string.format("%.0f", self.wrAvg))
+    if okm and type(kb) == "number" then
+        n = n + 1; setRow(rows, n, "Lua memory", string.format("%.2f MB", kb / 1024))
+        n = n + 1; setRow(rows, n, "Garbage created", string.format("%.0f KB/s", self.dbgRate or 0))
+    end
+    n = n + 1; setRow(rows, n, "Mode", PERF and "Performance Mode" or "Normal")
+    trimRows(rows, n)
+
+    rows, n = self.dbgPool.rows, 0
+    for _, k in ipairs(DBG_KINDS) do
+        n = n + 1; setRow(rows, n, k .. "s", tostring(KINDN[k] or 0))
+    end
+    local items = 0
+    for _ in pairs(self.items) do items = items + 1 end
+    n = n + 1; setRow(rows, n, "Pool entries", #pool .. (deadCount > 0 and ("  (" .. deadCount .. " removed)") or ""))
+    n = n + 1; setRow(rows, n, "Widgets / pages", items .. " / " .. #self.pages)
+    n = n + 1; setRow(rows, n, "Text width cache", TWN .. " + " .. FITN)
+    trimRows(rows, n)
+
+    rows, n = self.dbgScripts.rows, 0
+    for _, e in ipairs(self.dbgExt) do
+        local ok, v = pcall(e[2])
+        n = n + 1; setRow(rows, n, e[1], ok and tostring(v) or "error")
+    end
+    if n == 0 then n = 1; setRow(rows, 1, "No script lines yet", "") end
+    trimRows(rows, n)
+end
+
+function Lime:DebugReport()
+    self.dbgAt = nil
+    self:DebugTick(tick())
+    local out = { "fzzr " .. self.version .. " debug report" }
+    for _, sec in ipairs({ { "Performance", self.dbgPerf }, { "Drawing pool", self.dbgPool }, { "Scripts", self.dbgScripts } }) do
+        out[#out + 1] = "[" .. sec[1] .. "]"
+        for _, r in ipairs(sec[2].rows) do out[#out + 1] = r[1] .. ": " .. r[2] end
+    end
+    return table.concat(out, "\n")
+end
+
 local function drawBox(box, x, y, wd, z, enter)
     local rows = box.rows
     local bh = 16
@@ -1625,7 +1817,8 @@ local function drawBox(box, x, y, wd, z, enter)
     local total = 18 + bh + 10
     -- entirely outside the visible area: nothing to draw (the end-of-frame sweep hides it)
     if CLIP0 and (y + total < CLIP0 or y > CLIP1) then return total end
-    Txt(box, "title", string.upper(box.title), x + 2, y + 8, C.dim, 1, z, 10.5, true)
+    if box.titleSrc ~= box.title then box.titleSrc = box.title; box.titleUp = string.upper(box.title) end
+    Txt(box, "title", box.titleUp, x + 2, y + 8, C.dim, 1, z, 10.5, true)
     -- hover: the border fades toward the accent colour while the mouse is over the box
     local hv = hot(x, y + 18, wd, bh)
     local hh = ani(box, "bhov", hv and 1 or 0, 10)
@@ -1699,7 +1892,7 @@ local function drawSidebar(hub)
     local apParentY, apParentE, apChildY, apTopY
     for ci, cat in ipairs(hub.cats) do
         if ci > 1 then y = y + 8 end
-        Txt(hub, "cat" .. ci, string.upper(cat.name), 18, y + 8, C.dim, 1, 16, 10, true)
+        Txt(hub, kk("cat", ci), cat.upper or cat.name, 18, y + 8, C.dim, 1, 16, 10, true)
         y = y + 22
         for _, p in ipairs(cat.pages) do
             if #p.children == 0 then
@@ -1768,7 +1961,7 @@ local function drawTip(hub)
     if y + h_ > H - 6 then y = (hub.tipY or 0) - h_ - 8 end
     Box2(hub, "tipbg", x, y, w_, h_, C.popup, mix(C.border, C.accent, 0.3), ta, 60, 7)
     for i, l in ipairs(lines) do
-        Txt(hub, "tip" .. i, l, x + 11, y + 7 + (i - 0.5) * 15, mix(C.dim, C.text, 0.8), ta, 62, 11.5, false)
+        Txt(hub, kk("tip", i), l, x + 11, y + 7 + (i - 0.5) * 15, mix(C.dim, C.text, 0.8), ta, 62, 11.5, false)
     end
 end
 
@@ -1908,14 +2101,14 @@ local function drawHeader(hub)
             hub.statT = 0.5
             hub.fpsTxt = string.format("%d FPS", floor(hub.fps + 0.5))
         end
-        local pms = tonumber((hub.pingTxt or ""):match("%d+"))
+        local pms = hub.pingMs
         if pms then
-            local pc = pms < 60 and C.accent or (pms < 120 and WARN or rgb(255, 77, 77))
-            left = headerPill(hub.pingPill, right, pms .. " ms", C.dim, limit, pc, mix(C.dim, C.text, 0.35))
+            local pc = pms < 60 and C.accent or (pms < 120 and WARN or RED)
+            left = headerPill(hub.pingPill, right, hub.pingPillTxt, C.dim, limit, pc, mix(C.dim, C.text, 0.35))
             if left then right = left - 6 end
         end
         if hub.fpsTxt then
-            local fc = hub.fps >= 50 and C.accent or (hub.fps >= 30 and WARN or rgb(255, 77, 77))
+            local fc = hub.fps >= 50 and C.accent or (hub.fps >= 30 and WARN or RED)
             headerPill(hub.fpsPill, right, hub.fpsTxt, C.dim, limit, fc, mix(C.dim, C.text, 0.35))
         end
     end
@@ -1948,6 +2141,8 @@ local function drawFooter(hub)
         hub.pingT = 1
         local ok, p = pcall(GetPingValue)
         hub.pingTxt = ok and (floor(p) .. " ms") or ""
+        hub.pingMs = ok and floor(p) or nil            -- parsed once a second, not pattern-matched every frame
+        hub.pingPillTxt = hub.pingMs and (hub.pingMs .. " ms") or nil
     end
     local hidden = (hub:Get("user_disp") == "Hidden")
     local name = hidden and "user" or LocalPlayer.Name
@@ -1961,7 +2156,7 @@ local function drawFooter(hub)
         if not c.dset then c.dset = true; obj.Data = AVATAR_DATA end
         if not c.sset then c.sset = true; obj.Size = Vector2.new(24, 24) end
         local X, Y = px(18), py(fy + 15)
-        if c.px ~= X or c.py ~= Y then c.px = X; c.py = Y; obj.Position = Vector2.new(X, Y) end
+        if c.px ~= X or c.py ~= Y then c.px = X; c.py = Y; obj.Position = Vector2.new(X, Y); WR = WR + 1 end
         set(d, "Rounding", 12)
         set(d, "Transparency", floor(GA * 100 + 0.5) / 100)
         set(d, "ZIndex", 16)
@@ -2007,7 +2202,7 @@ local function drawWindow(hub)
         local sx, sy = LOGO_DW, LOGO_DH
         if c.sx ~= sx or c.sy ~= sy then c.sx = sx; c.sy = sy; obj.Size = Vector2.new(sx, sy) end
         local X, Y = px(14), py(LTOP)
-        if c.px ~= X or c.py ~= Y then c.px = X; c.py = Y; obj.Position = Vector2.new(X, Y) end
+        if c.px ~= X or c.py ~= Y then c.px = X; c.py = Y; obj.Position = Vector2.new(X, Y); WR = WR + 1 end
         set(d, "Transparency", floor(GA * 100 + 0.5) / 100)
         set(d, "ZIndex", 17)
         show(d)
@@ -2024,7 +2219,7 @@ local function drawOne(p, zb)
     if p.closing and t < 0.02 then return false end
     local ph = ani(p, "__h", p.measure(p), 18)
     local pxx, pyy = p.x, p.y
-    local vw, vh = Camera.ViewportSize.X, Camera.ViewportSize.Y
+    local vw, vh = VW, VH
     local fw = p.w + (p.exw or 0)
     if OX + pxx + fw > vw - 8 then pxx = vw - 8 - OX - fw end
     if OX + pxx < 8 then pxx = 8 - OX end
@@ -2083,7 +2278,7 @@ local function drawWatermark(hub)
     end
     local text = hub.wmText or hub.title
     local w = tw(text, 12) + 26
-    local vw = Camera.ViewportSize.X
+    local vw = VW
     GA = a
     local x = vw - w - 16 + (1 - a) * 16
     Box2(hub, "wm", x, 14, w, 26, C.group, C.border, 1, 150, 7)
@@ -2130,16 +2325,19 @@ local function drawBindList(hub)
     CLIP0, CLIP1 = bl.y + 30, bl.y + bh - 3
     for i, r in ipairs(rows) do
         local ry = bl.y + 30 + (i - 1) * 22
-        local ra = ani(hub, "blr" .. i, r[3] and 1 or 0, 12)
-        Txt(hub, "bll" .. i, r[1], bl.x + 14, ry + 11, mix(C.dim, C.text, ra), 1, 153, 12, true)
-        Txt(hub, "blk" .. i, "[" .. keyName(r[2]) .. "]", bl.x + 156 - 12, ry + 11, mix(C.dim, C.accent, ra), 1, 153, 12, true, "r")
+        local ra = ani(hub, kk("blr", i), r[3] and 1 or 0, 12)
+        Txt(hub, kk("bll", i), r[1], bl.x + 14, ry + 11, mix(C.dim, C.text, ra), 1, 153, 12, true)
+        local kn = r[4]                                   -- "[Key]" text cached per row (rebuilt only when the key changes)
+        if r[5] ~= r[2] then r[5] = r[2]; kn = "[" .. keyName(r[2]) .. "]"; r[4] = kn end
+        Txt(hub, kk("blk", i), kn, bl.x + 156 - 12, ry + 11, mix(C.dim, C.accent, ra), 1, 153, 12, true, "r")
     end
     CLIP0, CLIP1 = nil, nil
     GA = 1
 end
 
 local function drawToasts(hub)
-    local vw, vh = Camera.ViewportSize.X, Camera.ViewportSize.Y
+    if #hub.toasts == 0 then return end              -- nothing to draw: skip the setting lookup and the table below
+    local vw, vh = VW, VH
     local gpos = hub:Get("toast_pos") or "Center Bottom"
     local cursors = {}
     for i = #hub.toasts, 1, -1 do
@@ -2194,10 +2392,15 @@ end
 
 local function step(hub)
     local now = tick()
+    local wr0 = WR
     DT = clamp(now - hub.last, 0.001, 0.05)
     hub.last = now
     frameId = frameId + 1
     TIPC = nil                                   -- rows set this again while hovered
+    -- viewport: one property read per frame (and a camera re-fetch every ~2 s in case the game swapped it)
+    if frameId % 120 == 0 then Camera = workspace.CurrentCamera or Camera end
+    local vsz = Camera.ViewportSize
+    VW, VH = vsz.X, vsz.Y
     PERF = hub:Get("perf_mode") == true
     hub.fps = lerp(hub.fps, 1 / DT, 0.05)
     stepTheme()
@@ -2313,7 +2516,7 @@ local function step(hub)
     -- screen-space HUD
     local mOX, mOY = OX, OY
     OX, OY = 0, 0
-    local vw, vh = Camera.ViewportSize.X, Camera.ViewportSize.Y
+    local vw, vh = VW, VH
     if hub:Get("blur") and not PERF then
         local bd = ani(hub, "bd", hub.open and (hub:Get("blurpx") or 40) / 100 * 0.55 or 0, 8)
         Rect(hub, "bd", 0, 0, vw, vh, C.black, bd, 0, true, 0)
@@ -2350,6 +2553,8 @@ local function step(hub)
     end
     hub:CfgTick(now)      -- unsaved-change check (every 0.4s) + auto save
     sweep()
+    hub.wrAvg = hub.wrAvg + ((WR - wr0) - hub.wrAvg) * 0.05
+    if hub.debugPage and hub.active == hub.debugPage and fade > 0.5 then hub:DebugTick(now) end
 end
 
 --========================================================================
@@ -2371,7 +2576,10 @@ function Lime.Create(opts)
     hub.query = ""
     hub.clock, hub.scroll, hub.scrollT, hub.maxScroll = 0, 0, 0, 0
     hub.fps = 60
+    hub.frameMs, hub.peakMs, hub.peakAt, hub.wrAvg = 0, 0, 0, 0     -- Debug page counters
+    hub.dbgExt = {}                                                 -- lines registered with Lime:DebugStat
     hub.last, hub.born = tick(), tick()
+    hub.lastFrame = hub.born
     hub.bl = { x = 16, y = 260 }
     hub.searchBox = { text = "", onText = function(t) hub.query = t; hub.scrollT = 0 end }
     hub.PageAPI = PageAPI
@@ -2451,8 +2659,14 @@ function Lime:Run()
     _G.__FzzrHub = self
     self.conn = RunService.RenderStepped:Connect(function()
         if self.dead then return end
+        local t0 = tick()
+        self.lastFrame = t0                      -- heartbeat: a second launch can tell a live menu from a stale one
         local ok, err = pcall(step, self)
         if not ok and not self.warned then self.warned = true; warn("[fzzr] " .. tostring(err)) end
+        -- script time per frame (smoothed) and its peak over the last ~5 s, shown on the Debug page
+        local ms = (tick() - t0) * 1000
+        self.frameMs = self.frameMs + (ms - self.frameMs) * 0.1
+        if ms > self.peakMs or t0 - self.peakAt > 5 then self.peakMs = ms; self.peakAt = t0 end
     end)
 end
 
@@ -2628,6 +2842,26 @@ nt:Buttons({
     end },
 })
 
+-- Common > Debug -----------------------------------------------------------
+local dbg = hub:Page("Debug", { category = "Common", icon = "info" })
+hub.debugPage = dbg
+local dperf = dbg:Box("Performance", "Left")
+hub.dbgPerf = dperf:Stats()
+dperf:Caption("Script time is what this library spends per frame in Lua. The drawing itself is done by Matcha, so also watch the visible drawings and the property writes per frame.")
+local dtools = dbg:Box("Tools", "Left")
+dtools:Buttons({
+    { "Copy Report", function() hub:Copy(hub:DebugReport(), "Debug report copied") end },
+    { "Print Report", function()
+        print(hub:DebugReport())
+        hub:Toast({ Title = "Report printed", Text = "Check the console", Icon = "check", Duration = 2.5 })
+    end },
+    { "Reset Peak", function() hub.peakMs = 0; hub.peakAt = 0 end, full = true },
+})
+local dpool = dbg:Box("Drawing Pool", "Right")
+hub.dbgPool = dpool:Stats()
+local dscr = dbg:Box("Scripts", "Right")
+hub.dbgScripts = dscr:Stats()
+
 end
 
 function Lime:Init()
@@ -2659,7 +2893,7 @@ end
 
 -- Add* aliases (the short names keep working too)
 for _, n in ipairs({ "Switch", "Slider", "Choice", "Multi", "Popover", "KeyPill", "Entry", "Buttons", "ThemeList", "Caption",
-    "Notice", "Tabs", "Preview", "Chips", "Priority" }) do BoxAPI["Add" .. n] = BoxAPI[n] end
+    "Notice", "Tabs", "Preview", "Chips", "Priority", "Stats" }) do BoxAPI["Add" .. n] = BoxAPI[n] end
 BoxAPI.AddDropdown = BoxAPI.Choice
 PageAPI.AddBox = PageAPI.Box
 Lime.AddPage, Lime.AddTag = Lime.Page, Lime.Tag
