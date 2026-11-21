@@ -1,4 +1,4 @@
-# fzzr UI
+# fzzr priv
 
 A Drawing-API menu library for the **Matcha LuaVM** (Roblox). Sidebar pages, boxes, switches, sliders, dropdowns,
 keybinds, color pickers, toasts, themes, search, config saving, tooltips and more. It uses no Matcha menu API
