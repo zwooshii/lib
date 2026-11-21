@@ -1877,11 +1877,11 @@ local function searchBoxes(hub)
 end
 
 -- The page list scrolls inside this band: it ends just above the footer separator line (user + ping)
-local SIDE_TOP, SIDE_BOT = 60, H - 58
+local SIDE_TOP, SIDE_BOT = 66, H - 64      -- list area: strictly between the logo/version block and the footer
 local function sideRow(hub, p, y, h, alpha, child)
     -- rows fade out as they approach either cut edge, so none is ever left half-drawn
     local mid = y + h / 2
-    alpha = alpha * clamp((SIDE_BOT - mid) / 18, 0, 1) * clamp((mid - SIDE_TOP) / 18, 0, 1)
+    alpha = alpha * clamp((SIDE_BOT - mid - 6) / 14, 0, 1) * clamp((mid - SIDE_TOP - 6) / 14, 0, 1)
     local hv = hot(8, y, SW - 16, h)
     if hv and M.pressed and alpha > 0.5 then hub:Select(p) end
     local ha = ani(p, "hv", hv and 1 or 0, 14)
@@ -1895,7 +1895,7 @@ end
 
 local function drawSidebar(hub)
     local sa = ani(hub, "side", hub.sideT or 0, 16)       -- animated scroll offset of the list
-    local y, ty, th = 66 - sa, nil, nil
+    local y, ty, th = SIDE_TOP + 4 - sa, nil, nil
     CLIP0, CLIP1 = SIDE_TOP, SIDE_BOT
     local ap = hub.alertPage                -- page the unsaved-changes "!" leads to (Configs)
     local apParentY, apParentE, apChildY, apTopY
@@ -1926,7 +1926,7 @@ local function drawSidebar(hub)
     end
     -- orange "!" badge: sits on the Settings icon; as Settings opens it slides down onto the Configs row
     local aa = ani(hub, "alertA", (ap and hub.dirty) and 1 or 0, 12)
-    if aa > 0.02 and (apParentY or apTopY) then
+    if aa > 0.02 and (apParentY or apTopY) and not hub.noBadge then
         local bx, by
         if apParentY then
             local t = apChildY and apParentE or 0
@@ -1974,7 +1974,7 @@ local function drawSidebar(hub)
         -- thin scrollbar on the sidebar's right edge
         local ty0, trackH = SIDE_TOP + 4, SIDE_BOT - SIDE_TOP - 8
         local viewH = SIDE_BOT - SIDE_TOP
-        local thumbH = max(20, trackH * viewH / (viewH + maxS))
+        local thumbH = max(16, trackH * viewH / (viewH + maxS) * 0.85)
         local thumbY = ty0 + (trackH - thumbH) * clamp(sa / maxS, 0, 1)
         local hv = hot(SW - 12, ty0, 10, trackH)
         if hv and M.pressed and not dragOwner then dragOwner = hub.sideBar end
@@ -1982,7 +1982,7 @@ local function drawSidebar(hub)
             if M.down then hub.sideT = clamp((M.y - ty0 - thumbH / 2) / (trackH - thumbH), 0, 1) * maxS else dragOwner = nil end
         end
         local sb_a = ani(hub, "sideBarA", (hv or dragOwner == hub.sideBar) and 1 or 0, 14)
-        Rect(hub, "sbt2", SW - 8 - sb_a, thumbY, 3 + 2 * sb_a, thumbH, C.accent, 0.35 + 0.5 * sb_a, 19, true, 2)
+        Rect(hub, "sbt2", SW - 7 - sb_a, thumbY, 2 + sb_a, thumbH, mix(C.accent, C.bg, 0.55), 0.55 + 0.4 * sb_a, 19, true, 1)
     end
 end
 
@@ -2054,7 +2054,7 @@ local function drawContent(hub)
     if hub.maxScroll > 1 then
         -- scrollbar with breathing room: 9px from the window edge, and a few px short of the header / bottom edge
         local ty0, trackH = y0 + 4, viewH - 10
-        local thumbH = max(24, trackH * viewH / (viewH + hub.maxScroll))
+        local thumbH = max(18, trackH * viewH / (viewH + hub.maxScroll) * 0.85)
         local f = hub.maxScroll > 0 and (hub.scroll / hub.maxScroll) or 0
         local ty = ty0 + (trackH - thumbH) * clamp(f, 0, 1)
         local hv = hot(W - 20, ty0, 16, trackH)
@@ -2065,8 +2065,8 @@ local function drawContent(hub)
             else dragOwner = nil end
         end
         local sa = ani(hub, "sba", (hv or dragOwner == hub) and 1 or 0, 14)
-        Rect(hub, "sbt", W - 12, ty0, 3, trackH, C.track, 0.35, 40, true, 1.5)
-        Rect(hub, "sbh", W - 12 - sa, ty, 3 + 2 * sa, thumbH, C.accent, 0.5 + 0.5 * sa, 41, true, 2)
+        Rect(hub, "sbt", W - 11, ty0, 2, trackH, C.track, 0.2, 40, true, 1)
+        Rect(hub, "sbh", W - 11 - sa, ty, 2 + sa, thumbH, mix(C.accent, C.bg, 0.55), 0.55 + 0.4 * sa, 41, true, 1)
     end
 end
 
