@@ -499,6 +499,7 @@ local ICONDATA = {}                              -- file name -> raw PNG bytes (
 local function Pic(o, k, data, cx, cy, s, col, a, z)
     a = (a or 1) * GA
     if a < 0.01 then return end
+    if CLIP0 and (cy - s / 2 < CLIP0 or cy + s / 2 > CLIP1) then return end     -- images were the one primitive that ignored the clip
     local d = get(o, k, "Image")
     local c, obj = d.c, d.obj
     if c.data ~= data then c.data = data; obj.Data = data end
@@ -1875,7 +1876,12 @@ local function searchBoxes(hub)
     return out
 end
 
+-- The page list scrolls inside this band: it ends just above the footer separator line (user + ping)
+local SIDE_TOP, SIDE_BOT = 60, H - 58
 local function sideRow(hub, p, y, h, alpha, child)
+    -- rows fade out as they approach either cut edge, so none is ever left half-drawn
+    local mid = y + h / 2
+    alpha = alpha * clamp((SIDE_BOT - mid) / 18, 0, 1) * clamp((mid - SIDE_TOP) / 18, 0, 1)
     local hv = hot(8, y, SW - 16, h)
     if hv and M.pressed and alpha > 0.5 then hub:Select(p) end
     local ha = ani(p, "hv", hv and 1 or 0, 14)
@@ -1887,8 +1893,6 @@ local function sideRow(hub, p, y, h, alpha, child)
     Txt(p, "t", p.name, ix + 16, y + h / 2, tcol, alpha, 17, 13, true)
 end
 
--- The page list scrolls inside this band: it ends just above the footer separator line (user + ping)
-local SIDE_TOP, SIDE_BOT = 60, H - 58
 local function drawSidebar(hub)
     local sa = ani(hub, "side", hub.sideT or 0, 16)       -- animated scroll offset of the list
     local y, ty, th = 66 - sa, nil, nil
