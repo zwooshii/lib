@@ -264,6 +264,22 @@ end
 
 local FONT, FONTB = Drawing.Fonts.System, Drawing.Fonts.SystemBold
 -- cy is the vertical CENTER of the text; align: "l" (default), "r", "c"
+-- Matcha builds name the text size property differently ("FontSize" or "Size"): the first call finds the one that works
+local SIZEPROP
+local function setTextSize(d, n)
+    local c = d.c
+    if c.fs == n then return end
+    c.fs = n
+    local obj = d.obj
+    if SIZEPROP == nil then
+        if pcall(function() obj.FontSize = n end) then SIZEPROP = "FontSize"
+        elseif pcall(function() obj.Size = n end) then SIZEPROP = "Size"
+        else SIZEPROP = false end
+    elseif SIZEPROP then
+        obj[SIZEPROP] = n
+    end
+end
+
 local function Txt(o, key, s, x, cy, col, a, z, size, bold, align)
     a = (a or 1) * GA
     if a < 0.01 or s == nil or s == "" then return end
@@ -281,7 +297,7 @@ local function Txt(o, key, s, x, cy, col, a, z, size, bold, align)
     setcol(d, col)
     set(d, "Transparency", floor(a * 100 + 0.5) / 100)
     set(d, "ZIndex", z)
-    set(d, "FontSize", floor(size + 0.5))
+    setTextSize(d, floor(size + 0.5))
     -- bold: true = system bold, or pass a Drawing font directly (used by the build tags)
     set(d, "Font", (bold == true) and FONTB or bold or FONT)
     set(d, "Outline", false)
