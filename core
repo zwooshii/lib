@@ -1729,6 +1729,11 @@ end
 -- Debug: live performance readout (Common > Debug). Costs nothing unless that page is open.
 --========================================================================
 -- Scripts can add their own lines:  Window:DebugStat("Panels", function() return "12 drawings" end)
+-- Scripts can add a box to the Debug page:  Window:DebugBox(function(page) page:AddBox("Mine", "Left") ... end)
+function Lime:DebugBox(fn)
+    self.dbgQueue = self.dbgQueue or {}
+    self.dbgQueue[#self.dbgQueue + 1] = fn
+end
 function Lime:DebugStat(name, fn)
     for _, e in ipairs(self.dbgExt) do if e[1] == name then e[2] = fn; return end end
     self.dbgExt[#self.dbgExt + 1] = { name, fn }
@@ -2938,6 +2943,7 @@ local dpool = dbg:Box("Drawing Pool", "Right")
 hub.dbgPool = dpool:Stats()
 local dscr = dbg:Box("Scripts", "Right")
 hub.dbgScripts = dscr:Stats()
+for _, f in ipairs(hub.dbgQueue or {}) do pcall(f, dbg) end
 
 end
 
