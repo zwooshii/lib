@@ -156,11 +156,11 @@ end
 --========================================================================
 local THEMES = {
     { name = "Fzzr Signature",  bg = rgb(17, 15, 19),  side = rgb(22, 19, 24),  group = rgb(26, 22, 29),  border = rgb(52, 44, 55),  text = rgb(248, 240, 244), dim = rgb(143, 128, 137), accent = rgb(255, 168, 192) },
-    { name = "Fzzr Signature - Noir",       bg = rgb(12, 11, 13),  side = rgb(16, 15, 17),  group = rgb(20, 18, 21),  border = rgb(44, 38, 44),  text = rgb(246, 238, 242), dim = rgb(130, 118, 126), accent = rgb(255, 84, 144) },
-    { name = "Fzzr Signature - Rose",       bg = rgb(26, 16, 21),  side = rgb(32, 20, 26),  group = rgb(37, 24, 31),  border = rgb(68, 44, 56),  text = rgb(250, 238, 243), dim = rgb(160, 124, 139), accent = rgb(255, 122, 166) },
-    { name = "Fzzr Signature - Bubblegum",  bg = rgb(22, 17, 30),  side = rgb(27, 21, 37),  group = rgb(32, 25, 43),  border = rgb(62, 48, 80),  text = rgb(248, 240, 252), dim = rgb(144, 124, 162), accent = rgb(255, 134, 210) },
-    { name = "Fzzr Signature - Sakura",     bg = rgb(28, 22, 25),  side = rgb(34, 27, 30),  group = rgb(39, 31, 35),  border = rgb(72, 58, 64),  text = rgb(250, 242, 244), dim = rgb(158, 138, 146), accent = rgb(248, 184, 200) },
-    { name = "Fzzr Signature - Neon",       bg = rgb(13, 9, 15),   side = rgb(18, 12, 20),  group = rgb(22, 15, 25),  border = rgb(52, 32, 54),  text = rgb(255, 240, 247), dim = rgb(138, 110, 128), accent = rgb(255, 46, 126) },
+    { name = "Pink Noir",       bg = rgb(12, 11, 13),  side = rgb(16, 15, 17),  group = rgb(20, 18, 21),  border = rgb(44, 38, 44),  text = rgb(246, 238, 242), dim = rgb(130, 118, 126), accent = rgb(255, 84, 144) },
+    { name = "Pink Rose",       bg = rgb(26, 16, 21),  side = rgb(32, 20, 26),  group = rgb(37, 24, 31),  border = rgb(68, 44, 56),  text = rgb(250, 238, 243), dim = rgb(160, 124, 139), accent = rgb(255, 122, 166) },
+    { name = "Pink Bubblegum",  bg = rgb(22, 17, 30),  side = rgb(27, 21, 37),  group = rgb(32, 25, 43),  border = rgb(62, 48, 80),  text = rgb(248, 240, 252), dim = rgb(144, 124, 162), accent = rgb(255, 134, 210) },
+    { name = "Pink Sakura",     bg = rgb(28, 22, 25),  side = rgb(34, 27, 30),  group = rgb(39, 31, 35),  border = rgb(72, 58, 64),  text = rgb(250, 242, 244), dim = rgb(158, 138, 146), accent = rgb(248, 184, 200) },
+    { name = "Pink Neon",       bg = rgb(13, 9, 15),   side = rgb(18, 12, 20),  group = rgb(22, 15, 25),  border = rgb(52, 32, 54),  text = rgb(255, 240, 247), dim = rgb(138, 110, 128), accent = rgb(255, 46, 126) },
     { name = "Default",         bg = rgb(18, 18, 23),  side = rgb(22, 22, 28),  group = rgb(25, 25, 32),  border = rgb(46, 46, 58),  text = rgb(236, 236, 244), dim = rgb(122, 122, 140), accent = rgb(112, 118, 255) },
     { name = "Gruvbox",         bg = rgb(40, 40, 40),  side = rgb(50, 48, 47),  group = rgb(46, 44, 43),  border = rgb(80, 73, 69),  text = rgb(235, 219, 178), dim = rgb(146, 131, 116), accent = rgb(250, 189, 47) },
     { name = "Everforest",      bg = rgb(45, 53, 59),  side = rgb(52, 63, 68),  group = rgb(50, 60, 65),  border = rgb(71, 82, 88),  text = rgb(211, 198, 170), dim = rgb(133, 146, 137), accent = rgb(167, 192, 128) },
@@ -1561,12 +1561,64 @@ function Lime:Select(p)
     end
 end
 
--- Header pill, e.g. Window:AddTag("BETA", Color3.fromRGB(255, 159, 64)). Color: Color3 or { r, g, b } (0-1).
-function Lime:Tag(text, col)
-    if typeof(col) == "Color3" then col = { col.R, col.G, col.B } end
-    local t = { text = string.upper(tostring(text)), col = col or { 1, 1, 1 } }
-    self.tags[#self.tags + 1] = t
-    return t
+--========================================================================
+-- Header pills. Every pill is a plain data entry, drawn right to left in the header, so adding or changing one is a single call:
+--   Window:AddPill("id", {
+--       Text      = "READY"  |  function(hub) return "..." end,                    -- empty text = the pill is skipped
+--       Color     = Color3 | { r, g, b } | function(hub) return { r, g, b } end,   -- outline + tint
+--       Dot = true, DotColor = <same types as Color>, TextColor = <same types as Color>,
+--       MinText   = "000 FPS",      -- reserves the width of this text, so the pill does not resize while its text changes
+--       Click     = function(hub) end,                                              -- makes the pill clickable
+--       Visible   = true | function(hub) return bool end,
+--       Order     = 100,            -- lower = further left
+--       Style     = { height = 18, padX = 9, lite = true },                         -- per-pill overrides of TAG_STYLE
+--   })
+--   Window:SetPill("id", { Text = "..." })  changes fields later;  Window:RemovePill("id") removes it;
+--   Window:AddTag("text", Color3, keepCase) is the short form (build tags).
+-- Cost: a pill is 4 drawings (2 for the rounded frame, the dot, the text). With Style = { lite = true } it is 3 (one tinted rect,
+-- the dot, the text). Pills only write to the Drawing layer when something about them changes, so idle pills cost nothing per frame.
+--========================================================================
+local function toCol(c)
+    if typeof(c) == "Color3" then return { c.R, c.G, c.B } end
+    return c
+end
+local PILL_FIELDS = { Text = "text", Color = "color", DotColor = "dotColor", TextColor = "textColor", Dot = "dot",
+    MinText = "minText", Click = "click", Visible = "visible", Order = "order" }
+function Lime:SetPill(id, o)
+    o = o or {}
+    local p
+    for _, e in ipairs(self.pills) do if e.id == id then p = e end end
+    if not p then
+        self.pillSeq = (self.pillSeq or 0) + 1
+        p = { id = id, owner = {}, dot = true, order = 100, seq = self.pillSeq }
+        self.pills[#self.pills + 1] = p
+    end
+    for k, f in pairs(PILL_FIELDS) do
+        local v = o[k]
+        if v ~= nil then
+            if k == "Color" or k == "DotColor" or k == "TextColor" then v = toCol(v) end
+            p[f] = v
+        end
+    end
+    if o.Style then p.style = setmetatable(o.Style, { __index = TAG_STYLE }) end
+    table.sort(self.pills, function(a, b)
+        if a.order ~= b.order then return a.order < b.order end
+        return a.seq < b.seq
+    end)
+    return p
+end
+Lime.AddPill = Lime.SetPill
+function Lime:RemovePill(id)
+    for i, e in ipairs(self.pills) do
+        if e.id == id then release(e.owner); table.remove(self.pills, i); return end
+    end
+end
+-- build tag: upper-cased unless keepCase is true
+function Lime:Tag(text, col, keepCase)
+    self.tagN = (self.tagN or 0) + 1
+    text = tostring(text)
+    return self:SetPill("tag" .. self.tagN, { Text = keepCase and text or string.upper(text), Color = col or { 1, 1, 1 },
+        Order = 100 + self.tagN })
 end
 
 -- Copies text to the clipboard and shows a toast with the result.
@@ -2011,6 +2063,7 @@ function Lime:DebugTick(now)
         n = n + 1; setRow(rows, n, "Garbage created", string.format("%.0f KB/s", self.dbgRate or 0))
     end
     n = n + 1; setRow(rows, n, "Mode", PERF and "Performance Mode" or "Normal")
+    n = n + 1; setRow(rows, n, "Core / script version", tostring(self.coreVersion) .. " / " .. tostring(self.version))
     trimRows(rows, n)
 
     rows, n = self.dbgPool.rows, 0
@@ -2036,7 +2089,7 @@ end
 function Lime:DebugReport()
     self.dbgAt = nil
     self:DebugTick(tick())
-    local out = { "fzzr " .. self.version .. " debug report" }
+    local out = { "fzzr core " .. tostring(self.coreVersion) .. " / script " .. tostring(self.version) .. " debug report" }
     for _, sec in ipairs({ { "Performance", self.dbgPerf }, { "Drawing pool", self.dbgPool }, { "Scripts", self.dbgScripts } }) do
         out[#out + 1] = "[" .. sec[1] .. "]"
         for _, r in ipairs(sec[2].rows) do out[#out + 1] = r[1] .. ": " .. r[2] end
@@ -2315,24 +2368,53 @@ end
 
 -- One header pill: [dot] text. Its right edge sits at `right`; returns its left edge (nil if it would run into the
 -- search box, in which case nothing is drawn). Used by the build tags, the FPS / ping readouts and the config chip.
-local function headerPill(o, right, text, col, limit, dotCol, textCol, minTxt)
-    local S = TAG_STYLE
+-- draws one pill with its right edge at `right`; returns its left edge, `right` unchanged when it has no text, or nil when it would
+-- run into the search box (then nothing is drawn)
+local function drawPill(hub, p, right, limit)
+    local S = p.style or TAG_STYLE
+    local text = p.text
+    if type(text) == "function" then text = text(hub, p) end
+    if text == nil or text == "" then return right end
+    local col = p.color
+    if type(col) == "function" then col = col(hub, p) end
+    col = col or C.dim
     local txw = tw(text, S.size) * S.widthScale
-    if minTxt and txw < minTxt then txw = minTxt end            -- fixed-width pills (FPS / ping)
-    local w_ = floor(S.padX * 2 + 4.4 + S.dotGap + txw + 0.5)
+    if p.minText then
+        local m = tw(p.minText, S.size) * S.widthScale
+        if txw < m then txw = m end                               -- fixed-width pills
+    end
+    local hasDot = p.dot ~= false
+    local dotW = hasDot and (4.4 + S.dotGap) or 0
+    local w_ = floor(S.padX * 2 + dotW + txw + 0.5)
     local left = right - w_
     if left < limit then return nil end
     local hcy = HDR / 2
     local ty = floor(hcy - S.height / 2)
+    local o = p.owner
     local hv = hot(left, ty, w_, S.height)
     local ha = ani(o, "h", hv and 1 or 0, 14)
-    Box2(o, "bx", left, ty, w_, S.height, mix(C.group, col, 0.14 + 0.08 * ha), mix(C.border, col, 0.55 + 0.25 * ha), 1, 21, floor(S.height / 2))
-    Circ(o, "dot", left + S.padX + 2.2, hcy, 2.2, dotCol or col, 1, 23, true)
+    if S.lite then
+        Rect(o, "bx", left, ty, w_, S.height, mix(C.group, col, 0.22 + 0.1 * ha), 1, 21, true, floor(S.height / 2))
+    else
+        Box2(o, "bx", left, ty, w_, S.height, mix(C.group, col, 0.14 + 0.08 * ha), mix(C.border, col, 0.55 + 0.25 * ha), 1, 21,
+            floor(S.height / 2))
+    end
+    if hasDot then
+        local dc = p.dotColor
+        if type(dc) == "function" then dc = dc(hub, p) end
+        Circ(o, "dot", left + S.padX + 2.2, hcy, 2.2, dc or col, 1, 23, true)
+    end
+    local tcol = p.textColor
+    if type(tcol) == "function" then tcol = tcol(hub, p) end
     -- the text is centred in the area after the dot, so any width-estimate error is shared evenly left and right
-    local tcx = left + S.padX + 4.4 + S.dotGap + txw / 2 + S.textDX
-    Txt(o, "tx", text, tcx, hcy + S.textDY, textCol or col, 1, 23, S.size, S.font, "c")
-    if S.faux then Txt(o, "tx2", text, tcx + 1, hcy + S.textDY, textCol or col, 1, 23, S.size, S.font, "c") end
-    return left, hv
+    local tcx = left + S.padX + dotW + txw / 2 + S.textDX
+    Txt(o, "tx", text, tcx, hcy + S.textDY, tcol or col, 1, 23, S.size, S.font, "c")
+    if S.faux then Txt(o, "tx2", text, tcx + 1, hcy + S.textDY, tcol or col, 1, 23, S.size, S.font, "c") end
+    if hv and p.click then
+        hub.chipHot = true                                         -- keeps a click on the pill from starting a window drag
+        if M.pressed then p.click(hub, p) end
+    end
+    return left
 end
 
 local function drawHeader(hub)
@@ -2368,48 +2450,24 @@ local function drawHeader(hub)
     end
     Rect(sb, "ul", SW + 20, hcy + 11, 220 * fa, 1.5, C.accent, 1, 22, true, 1)
 
-    -- top right, right to left: build tags, config chip, ping, FPS (whatever does not fit is skipped)
+    -- top right: every pill, right to left (whatever does not fit next to the search box is skipped)
     local right, limit = W - 18, SW + 262
     hub.chipHot = false
-    for i = #hub.tags, 1, -1 do
-        local t = hub.tags[i]
-        local left = headerPill(t, right, t.text, t.col, limit)
-        if not left then break end
-        right = left - 5
-    end
-    if hub:Get("hdr_stats") ~= false then
-        -- config chip: dot is dim with no config, accent when loaded, orange while there are unsaved changes
-        local da = ani(hub, "chipD", hub.dirty and 1 or 0, 12)
-        local name = hub.cfgName and fit(hub.cfgName, 90, TAG_STYLE.size) or "No config"
-        local dot = mix(mix(C.dim, C.accent, hub.cfgName and 0.8 or 0), WARN, da)
-        local left, chv = headerPill(hub.chip, right, name, mix(C.dim, WARN, da * 0.9), limit, dot, mix(C.dim, C.text, 0.35 + 0.4 * da))
-        if left then
-            right = left - 5
-            if chv then hub.chipHot = true; if M.pressed then hub:Select(hub.alertPage) end end
-        end
-        -- ping + FPS refresh a couple of times per second (the width follows the text)
-        hub.statT = (hub.statT or 0) - DT
-        if hub.statT <= 0 then
-            hub.statT = 0.5
-            hub.fpsTxt = string.format("%d FPS", floor(hub.fps + 0.5))
-        end
-        local pms = hub.pingMs
-        if pms then
-            local pc = pms < 60 and C.accent or (pms < 120 and WARN or RED)
-            left = headerPill(hub.pingPill, right, hub.pingPillTxt, C.dim, limit, pc, mix(C.dim, C.text, 0.35),
-                tw("000 ms", TAG_STYLE.size) * TAG_STYLE.widthScale)
-            if left then right = left - 5 end
-        end
-        if hub.fpsTxt then
-            local fc = hub.fps >= 50 and C.accent or (hub.fps >= 30 and WARN or RED)
-            headerPill(hub.fpsPill, right, hub.fpsTxt, C.dim, limit, fc, mix(C.dim, C.text, 0.35),
-                tw("000 FPS", TAG_STYLE.size) * TAG_STYLE.widthScale)
+    local pills = hub.pills
+    for i = #pills, 1, -1 do
+        local p = pills[i]
+        local vis = p.visible
+        if type(vis) == "function" then vis = vis(hub, p) end
+        if vis ~= false then
+            local left = drawPill(hub, p, right, limit)
+            if not left then break end
+            if left ~= right then right = left - 5 end
         end
     end
 end
 
 -- Header logo: downloaded from the repo by Lime:LoadIcons() (see LOGO_FILES / LogoUrl) --------
-local VERSION = "1.0.0"
+local VERSION = "0.0.5"          -- core version (scripts can read it from Fzzr.Version and check it with Fzzr.VersionAtLeast)
 local LOGO_W, LOGO_H = 64, 34          -- the logo is fitted inside this box, keeping its own aspect ratio
 local AVATAR_DATA                      -- raw PNG bytes of the local player's headshot, set once downloaded
 local LOGO_FILES = { "fzzr.png", "Fzzr.png", "FZZR.png", "logo.png", "Logo.png", "fzzr_logo.png", "fzzr-logo.png", "FzzrLogo.png" }   -- tried in order under IMG_BASE
@@ -2462,7 +2520,21 @@ local function drawFooter(hub)
         Txt(hub, "fti", string.upper(name:sub(1, 1)), 30, fy + 27, C.text, 1, 18, 12, true, "c")
     end
     Txt(hub, "ftn", fit(name, SW - 62, 12), 50, fy + 21, C.text, 1, 17, 12, true)
-    Txt(hub, "ftp", hub.pingTxt or "", 50, fy + 35, mix(C.dim, C.bg, 0.25), 1, 17, 10.5, false)
+    -- FPS and ping live under the name (refreshed twice a second)
+    hub.statT = (hub.statT or 0) - DT
+    if hub.statT <= 0 then
+        hub.statT = 0.5
+        hub.fpsTxt = string.format("%d FPS", floor(hub.fps + 0.5))
+    end
+    local fc = hub.fps >= 50 and C.accent or (hub.fps >= 30 and WARN or RED)
+    Txt(hub, "ftf", hub.fpsTxt or "", 50, fy + 35, mix(C.dim, fc, 0.8), 1, 17, 10.5, true)
+    if hub.pingPillTxt then
+        local pms = hub.pingMs
+        local pc = pms < 60 and C.accent or (pms < 120 and WARN or RED)
+        local px2 = 50 + tw(hub.fpsTxt or "", 10.5) + 14
+        Circ(hub, "ftd", px2 - 7, fy + 35, 1.2, C.dim, 1, 17, true)
+        Txt(hub, "ftp", hub.pingPillTxt, px2, fy + 35, mix(C.dim, pc, 0.8), 1, 17, 10.5, true)
+    end
 end
 
 local function drawWindow(hub)
@@ -2988,7 +3060,8 @@ function Lime.Create(opts)
     opts = opts or {}
     local hub = setmetatable({}, Lime)
     hub.title = opts.Title or "fzzr"
-    hub.version = opts.Version or VERSION
+    hub.version = opts.Version or VERSION      -- the script's own version (shown under the logo)
+    hub.coreVersion = VERSION
     hub.logoUrl = opts.LogoUrl
     if opts.IconBase then IMG_BASE = opts.IconBase end          -- folder that holds the icon PNGs
     hub.sideBar, hub.sideT, hub.sideMax = {}, 0, 0                    -- sidebar list scroll
@@ -3003,8 +3076,18 @@ function Lime.Create(opts)
     end
     hub.pages, hub.cats, hub.items, hub.bindList, hub.toasts = {}, {}, {}, {}, {}
     hub.colorItems = {}
-    hub.tags = {}
-    hub.chip, hub.pingPill, hub.fpsPill = {}, {}, {}   -- draw owners for the header pills
+    hub.pills = {}
+    -- built-in pill: the loaded config (grey with none, accent when loaded, orange while there are unsaved changes)
+    hub:SetPill("config", { Order = 10, Dot = true,
+        Visible = function(h) return h:Get("hdr_stats") ~= false end,
+        Text = function(h) return h.cfgName and fit(h.cfgName, 90, TAG_STYLE.size) or "No config" end,
+        Color = function(h)
+            h.chipDa = ani(h, "chipD", h.dirty and 1 or 0, 12)       -- evaluated first: the two colours below reuse it
+            return mix(C.dim, WARN, h.chipDa * 0.9)
+        end,
+        DotColor = function(h) return mix(mix(C.dim, C.accent, h.cfgName and 0.8 or 0), WARN, h.chipDa or 0) end,
+        TextColor = function(h) return mix(C.dim, C.text, 0.35 + 0.4 * (h.chipDa or 0)) end,
+        Click = function(h) h:Select(h.alertPage) end })
     hub.open = true
     hub.query = ""
     hub.clock, hub.scroll, hub.scrollT, hub.maxScroll = 0, 0, 0, 0
@@ -3265,7 +3348,7 @@ stp:Switch("show_on_load", "Show Menu on Load", true)
 stp:KeyPill("menu_key", "Menu Toggle", 0x46, { dim = true })
 local hud = display:Box("HUD", "Right")
 hud:Choice("user_disp", "Username Display", { "Visible", "Hidden" }, 1, { width = 100 })
-hud:Switch("hdr_stats", "Header Stats", true, { tip = "Shows FPS, ping and the loaded config in the top right of the menu." })
+hud:Switch("hdr_stats", "Header Stats", true, { tip = "Shows the loaded config chip in the top right of the menu. FPS and ping sit under your name." })
 hud:Switch("wm", "Show Watermark", false, { tip = "Small bar on screen with your name, ping and FPS." })
 hud:Switch("bl", "Show Bind List", true)
 hud:Switch("bl_active", "Active Binds Only", true)
@@ -3363,6 +3446,18 @@ PageAPI.AddBox = PageAPI.Box
 Lime.AddPage, Lime.AddTag = Lime.Page, Lime.Tag
 
 local Fzzr = { Version = VERSION, rgb = rgb }
+-- Fzzr.VersionAtLeast("0.0.5") -> true when this core is that version or newer
+local function parseVer(v)
+    local a, b, c = tostring(v or ""):match("^(%d+)%.?(%d*)%.?(%d*)")
+    return tonumber(a) or 0, tonumber(b) or 0, tonumber(c) or 0
+end
+function Fzzr.VersionAtLeast(v)
+    local a1, b1, c1 = parseVer(VERSION)
+    local a2, b2, c2 = parseVer(v)
+    if a1 ~= a2 then return a1 > a2 end
+    if b1 ~= b2 then return b1 > b2 end
+    return c1 >= c2
+end
 -- opts: Title, Version, Position = { x, y }, LogoUrl, IconBase, TagStyle = {...}, Tags = { { "BETA", Color3 }, ... }
 function Fzzr:CreateWindow(opts)
     opts = opts or {}
