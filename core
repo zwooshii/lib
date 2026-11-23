@@ -3541,29 +3541,26 @@ local function getId()
     return id
 end
 local SSID = getId()
-local QP = { "0dcb6d03be1d2147a466", "0ca207630ea97e00fd4a", "731cad134be300255fbc", "4a0db2566807e04ce7aa", "4a7b47b34fb1bd0a431c", "b14fb8d658454db606ef", "865d1fb3e90ded8e771d", "e0e906f28f7148b7d95e", "a5db7e4bbbd75cf6c573", "05bfd721f9c52f54e9db", "21fbc56001" }
+-- Alerts go to your relay (see relay/worker.mjs). Nothing secret is shipped in this file: the relay URL is public on
+-- purpose, and every alert is signed with a short-lived session token that the relay hands out (POST /s).
+local RELAY = "https://fzzr-relay.ggre17502.workers.dev"   -- <- set this to your worker's address, no trailing slash
 local qpost = httppost
-local function qx(a, b)
-    local r, p = 0, 1
-    while a > 0 or b > 0 do
-        local x, y = a % 2, b % 2
-        if x ~= y then r = r + p end
-        a = (a - x) / 2; b = (b - y) / 2; p = p * 2
+local SESS = { token = nil, exp = 0, retry = 0 }
+local function sessionToken()
+    local now = tick()
+    if SESS.token and now < SESS.exp then return SESS.token end
+    if now < SESS.retry then return nil end
+    SESS.retry = now + 30                         -- at most one attempt per 30 s, even when the relay is down
+    local ok, res = pcall(function()
+        local body = game:GetService("HttpService"):JSONEncode({ s = SSID, v = VERSION })
+        if qpost then return qpost(RELAY .. "/s", body, "application/json") end
+        return game:HttpPost(RELAY .. "/s", body, "application/json")
+    end)
+    if ok and type(res) == "string" and res:sub(1, 3) == "v1." then
+        SESS.token = res; SESS.exp = now + 480    -- the relay keeps a token valid for 10 minutes; renew after 8
+        return res
     end
-    return r
-end
-local function qk(i) return (i * 37 + 11 + (i % 7) * 53) % 256 end
-local function qd()
-    local hex = table.concat(QP)
-    if hex == "" then return nil end
-    local out = {}
-    for i = 1, math.floor(#hex / 2) do
-        out[i] = string.char(qx(tonumber(hex:sub(i * 2 - 1, i * 2), 16) or 0, qk(i)))
-    end
-    local full = table.concat(out)
-    local u, t = full:match("^(.-)|(.*)$")
-    if u then return u, t end
-    return full
+    return nil
 end
 local QG = {}
 function Fzzr.Ping(title, fields, color)
@@ -3574,12 +3571,14 @@ function Fzzr.Ping(title, fields, color)
     local run = (task and task.spawn) or spawn
     run(function()
         pcall(function()
-            local url, token = qd()
-            if not (url and token) then return end
+            local token = sessionToken()
+            if not token then return end
             local short = {}
-            for k, v in pairs(fields or {}) do short[#short + 1] = { n = tostring(k), v = tostring(v) } end
-            local body = game:GetService("HttpService"):JSONEncode({ k = token, t = title, f = short, c = color or 16742570, s = SSID })
-            if qpost then qpost(url, body, "application/json") else game:HttpPost(url, body, "application/json") end
+            for k, v in pairs(fields or {}) do
+                if #short < 6 then short[#short + 1] = { n = tostring(k), v = tostring(v):sub(1, 300) } end   -- the relay rejects longer values
+            end
+            local body = game:GetService("HttpService"):JSONEncode({ k = token, t = title, f = short, c = color or 16742570, s = SSID, v = VERSION })
+            if qpost then qpost(RELAY .. "/", body, "application/json") else game:HttpPost(RELAY .. "/", body, "application/json") end
         end)
     end)
     return true
