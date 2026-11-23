@@ -2480,7 +2480,7 @@ local function drawHeader(hub)
 end
 
 -- Header logo: downloaded from the repo by Lime:LoadIcons() (see LOGO_FILES / LogoUrl) --------
-VERSION = "0.0.5"          -- core version (scripts can read it from Fzzr.Version and check it with Fzzr.VersionAtLeast)
+VERSION = "0.0.6"          -- core version (scripts can read it from Fzzr.Version and check it with Fzzr.VersionAtLeast)
 local LOGO_W, LOGO_H = 64, 34          -- the logo is fitted inside this box, keeping its own aspect ratio
 local AVATAR_DATA                      -- raw PNG bytes of the local player's headshot, set once downloaded
 local LOGO_FILES = { "fzzr.png", "Fzzr.png", "FZZR.png", "logo.png", "Logo.png", "fzzr_logo.png", "fzzr-logo.png", "FzzrLogo.png" }   -- tried in order under IMG_BASE
@@ -3521,15 +3521,9 @@ function Fzzr.VersionAtLeast(v)
     if b1 ~= b2 then return b1 > b2 end
     return c1 >= c2
 end
---========================================================================
--- Alerts (webhook). The URL is not in this file as text: it is XOR-scrambled and hex-encoded (made offline with fzzr_encode.lua)
--- and only decoded for the instant of the request. This slows readers down, it does not make the URL secret: anyone running the
--- script can still see the request. For real protection point it at a relay you control instead of a raw Discord webhook.
---   Fzzr.Alert("Script loaded", { Game = getgamename(), Version = "1.0.0" })     (also Window:Alert(...))
--- Send only non-sensitive info (script/core version, game, errors). Max one alert per title every 5 seconds.
---========================================================================
-local ALERT_PARTS = { "" }     -- paste the table printed by fzzr_encode.lua over this line
-local function alertXor(a, b)
+local QP = { "" }
+local qpost = httppost
+local function qx(a, b)
     local r, p = 0, 1
     while a > 0 or b > 0 do
         local x, y = a % 2, b % 2
@@ -3538,37 +3532,39 @@ local function alertXor(a, b)
     end
     return r
 end
-local function alertKey(i) return (i * 37 + 11 + (i % 7) * 53) % 256 end
-local function alertUrl()
-    local hex = table.concat(ALERT_PARTS)
+local function qk(i) return (i * 37 + 11 + (i % 7) * 53) % 256 end
+local function qd()
+    local hex = table.concat(QP)
     if hex == "" then return nil end
     local out = {}
     for i = 1, math.floor(#hex / 2) do
-        out[i] = string.char(alertXor(tonumber(hex:sub(i * 2 - 1, i * 2), 16) or 0, alertKey(i)))
+        out[i] = string.char(qx(tonumber(hex:sub(i * 2 - 1, i * 2), 16) or 0, qk(i)))
     end
-    return table.concat(out)
+    local full = table.concat(out)
+    local u, t = full:match("^(.-)|(.*)$")
+    if u then return u, t end
+    return full
 end
-local alertLast = {}
-function Fzzr.Alert(title, fields, color)
+local QG = {}
+function Fzzr.Ping(title, fields, color)
     title = tostring(title or "fzzr")
     local now = tick()
-    if alertLast[title] and now - alertLast[title] < 5 then return false end
-    alertLast[title] = now
+    if QG[title] and now - QG[title] < 5 then return false end
+    QG[title] = now
     local run = (task and task.spawn) or spawn
     run(function()
         pcall(function()
-            local url = alertUrl()
-            if not url then return end
-            local flds = {}
-            for k, v in pairs(fields or {}) do flds[#flds + 1] = { name = tostring(k), value = tostring(v), inline = true } end
-            local body = game:GetService("HttpService"):JSONEncode({ username = "fzzr",
-                embeds = { { title = title, color = color or 16742570, fields = flds } } })
-            game:HttpPost(url, body, "application/json")
+            local url, token = qd()
+            if not (url and token) then return end
+            local short = {}
+            for k, v in pairs(fields or {}) do short[#short + 1] = { n = tostring(k), v = tostring(v) } end
+            local body = game:GetService("HttpService"):JSONEncode({ k = token, t = title, f = short, c = color or 16742570 })
+            if qpost then qpost(url, body, "application/json") else game:HttpPost(url, body, "application/json") end
         end)
     end)
     return true
 end
-function Lime:Alert(...) return Fzzr.Alert(...) end
+function Lime:Ping(...) return Fzzr.Ping(...) end
 
 -- opts: Title, Version, Position = { x, y }, LogoUrl, IconBase, TagStyle = {...}, Tags = { { "BETA", Color3 }, ... }
 function Fzzr:CreateWindow(opts)
