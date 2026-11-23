@@ -64,7 +64,7 @@ local RED = rgb(255, 77, 77)         -- bad ping / low FPS (was a new table ever
 --   textDX / textDY        : move the text in pixels (negative = left / up) if it still looks off
 --   font                   : true = system bold;  faux = draws the text twice 1px apart (blurry, off by default)
 -- FPS and ping pills reserve the width of "000 FPS" / "000 ms", so they no longer grow and shrink as the numbers change.
-local TAG_STYLE = { font = true, faux = false, size = 12, widthScale = 1.02, padX = 9, dotGap = 5, height = 19,
+local TAG_STYLE = { font = false, faux = false, size = 11, widthScale = 1.0, padX = 11, dotGap = 6, height = 18,
     textDX = 0, textDY = -1 }
 -- mix() returns a table from a ring buffer instead of allocating one: every caller consumes the
 -- result immediately (setcol copies the numbers), so reuse is safe and creates no garbage.
@@ -3521,6 +3521,55 @@ function Fzzr.VersionAtLeast(v)
     if b1 ~= b2 then return b1 > b2 end
     return c1 >= c2
 end
+--========================================================================
+-- Alerts (webhook). The URL is not in this file as text: it is XOR-scrambled and hex-encoded (made offline with fzzr_encode.lua)
+-- and only decoded for the instant of the request. This slows readers down, it does not make the URL secret: anyone running the
+-- script can still see the request. For real protection point it at a relay you control instead of a raw Discord webhook.
+--   Fzzr.Alert("Script loaded", { Game = getgamename(), Version = "1.0.0" })     (also Window:Alert(...))
+-- Send only non-sensitive info (script/core version, game, errors). Max one alert per title every 5 seconds.
+--========================================================================
+local ALERT_PARTS = { "" }     -- paste the table printed by fzzr_encode.lua over this line
+local function alertXor(a, b)
+    local r, p = 0, 1
+    while a > 0 or b > 0 do
+        local x, y = a % 2, b % 2
+        if x ~= y then r = r + p end
+        a = (a - x) / 2; b = (b - y) / 2; p = p * 2
+    end
+    return r
+end
+local function alertKey(i) return (i * 37 + 11 + (i % 7) * 53) % 256 end
+local function alertUrl()
+    local hex = table.concat(ALERT_PARTS)
+    if hex == "" then return nil end
+    local out = {}
+    for i = 1, math.floor(#hex / 2) do
+        out[i] = string.char(alertXor(tonumber(hex:sub(i * 2 - 1, i * 2), 16) or 0, alertKey(i)))
+    end
+    return table.concat(out)
+end
+local alertLast = {}
+function Fzzr.Alert(title, fields, color)
+    title = tostring(title or "fzzr")
+    local now = tick()
+    if alertLast[title] and now - alertLast[title] < 5 then return false end
+    alertLast[title] = now
+    local run = (task and task.spawn) or spawn
+    run(function()
+        pcall(function()
+            local url = alertUrl()
+            if not url then return end
+            local flds = {}
+            for k, v in pairs(fields or {}) do flds[#flds + 1] = { name = tostring(k), value = tostring(v), inline = true } end
+            local body = game:GetService("HttpService"):JSONEncode({ username = "fzzr",
+                embeds = { { title = title, color = color or 16742570, fields = flds } } })
+            game:HttpPost(url, body, "application/json")
+        end)
+    end)
+    return true
+end
+function Lime:Alert(...) return Fzzr.Alert(...) end
+
 -- opts: Title, Version, Position = { x, y }, LogoUrl, IconBase, TagStyle = {...}, Tags = { { "BETA", Color3 }, ... }
 function Fzzr:CreateWindow(opts)
     opts = opts or {}
