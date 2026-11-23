@@ -64,7 +64,7 @@ local RED = rgb(255, 77, 77)         -- bad ping / low FPS (was a new table ever
 --   textDX / textDY        : move the text in pixels (negative = left / up) if it still looks off
 --   font                   : true = system bold;  faux = draws the text twice 1px apart (blurry, off by default)
 -- FPS and ping pills reserve the width of "000 FPS" / "000 ms", so they no longer grow and shrink as the numbers change.
-local TAG_STYLE = { font = true, faux = false, size = 10, widthScale = 1.08, padX = 9, dotGap = 5, height = 18,
+local TAG_STYLE = { font = true, faux = false, size = 12, widthScale = 1.08, padX = 10, dotGap = 5, height = 22,
     textDX = 0, textDY = -1 }
 -- mix() returns a table from a ring buffer instead of allocating one: every caller consumes the
 -- result immediately (setcol copies the numbers), so reuse is safe and creates no garbage.
@@ -1583,7 +1583,7 @@ local function toCol(c)
     return c
 end
 local PILL_FIELDS = { Text = "text", Color = "color", DotColor = "dotColor", TextColor = "textColor", Dot = "dot",
-    MinText = "minText", Click = "click", Visible = "visible", Order = "order" }
+    MinText = "minText", Click = "click", Visible = "visible", Order = "order", Side = "side" }
 function Lime:SetPill(id, o)
     o = o or {}
     local p
@@ -1618,7 +1618,7 @@ function Lime:Tag(text, col, keepCase)
     self.tagN = (self.tagN or 0) + 1
     text = tostring(text)
     return self:SetPill("tag" .. self.tagN, { Text = keepCase and text or string.upper(text), Color = col or { 1, 1, 1 },
-        Order = 100 + self.tagN })
+        Order = 100 + self.tagN, Side = true })     -- Side: drawn under the logo (see drawWindow), not in the header
 end
 
 -- Copies text to the clipboard and shows a toast with the result.
@@ -2465,7 +2465,7 @@ local function drawHeader(hub)
         local p = pills[i]
         local vis = p.visible
         if type(vis) == "function" then vis = vis(hub, p) end
-        if vis ~= false then
+        if vis ~= false and not p.side then
             local left = drawPill(hub, p, right, limit)
             if not left then break end
             if left ~= right then right = left - 5 end
@@ -2584,6 +2584,41 @@ local function drawWindow(hub)
         Txt(hub, "title", hub.title, 20, 28, C.text, 1, 16, 24, true)
         Txt(hub, "ver", "v" .. hub.version, 20 + tw(hub.title, 24) + 6, 34, mix(C.dim, C.bg, 0.4), 1, 16, 10, true)
     end
+
+    -- build tags (Lime:Tag / AddTag): plain coloured text under the logo and version instead of header pills. They wrap onto
+    -- another row when they do not fit the sidebar width, and the page list below starts lower by exactly the rows they use.
+    local TS = TAG_STYLE
+    local rowY = (LOGO_DATA and 49 or 34) + 17        -- centre of the first tag row
+    local tx, lastCy = 16, nil
+    for _, p in ipairs(hub.pills) do
+        if p.side then
+            local vis = p.visible
+            if type(vis) == "function" then vis = vis(hub, p) end
+            local text = p.text
+            if type(text) == "function" then text = text(hub, p) end
+            if vis ~= false and text ~= nil and text ~= "" then
+                local col = p.color
+                if type(col) == "function" then col = col(hub, p) end
+                col = col or C.dim
+                local hasDot = p.dot ~= false
+                local dotW = hasDot and 11 or 0
+                local w_ = tw(text, TS.size) * TS.widthScale + dotW
+                if lastCy and tx > 16 and tx + w_ > SW - 12 then tx = 16; lastCy = lastCy + 18 end    -- wrap to the next row
+                lastCy = lastCy or rowY
+                local o = p.owner
+                if hasDot then
+                    local dc = p.dotColor
+                    if type(dc) == "function" then dc = dc(hub, p) end
+                    Circ(o, "sdot", tx + 2.5, lastCy, 2.5, dc or col, 1, 23, true)
+                end
+                local tcol = p.textColor
+                if type(tcol) == "function" then tcol = tcol(hub, p) end
+                Txt(o, "stx", text, tx + dotW, lastCy + TS.textDY, tcol or col, 1, 23, TS.size, TS.font)
+                tx = tx + w_ + 12
+            end
+        end
+    end
+    SIDE_TOP = lastCy and (lastCy + 17) or 66       -- 66 = no tags: the list starts right under the version
 end
 
 local function drawOne(p, zb)
