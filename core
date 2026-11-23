@@ -1644,6 +1644,7 @@ function Lime:Toast(o)
     return t
 end
 
+do   -- scoped block A: configs / themes (its helpers are private to this section)
 --========================================================================
 -- Configs: save / load / delete / autoload and unsaved-change tracking
 --========================================================================
@@ -2004,6 +2005,12 @@ function Lime:Destroy()
     pool, shownList, shownN, KINDN, liveN, deadCount = {}, {}, 0, {}, 0, 0
     if _G.__FzzrHub == self then _G.__FzzrHub = nil end
 end
+end   -- end of scoped block A (configs / themes)
+
+-- Lua allows 200 locals per scope. Blocks A and B below keep their private helpers out of the top-level
+-- scope; only the three names that are used after block B are declared out here.
+local VERSION, bindActive, hookWheel
+do   -- scoped block B: frame drawing / HUD / step
 
 --========================================================================
 -- Frame drawing
@@ -2467,7 +2474,7 @@ local function drawHeader(hub)
 end
 
 -- Header logo: downloaded from the repo by Lime:LoadIcons() (see LOGO_FILES / LogoUrl) --------
-local VERSION = "0.0.5"          -- core version (scripts can read it from Fzzr.Version and check it with Fzzr.VersionAtLeast)
+VERSION = "0.0.5"          -- core version (scripts can read it from Fzzr.Version and check it with Fzzr.VersionAtLeast)
 local LOGO_W, LOGO_H = 64, 34          -- the logo is fitted inside this box, keeping its own aspect ratio
 local AVATAR_DATA                      -- raw PNG bytes of the local player's headshot, set once downloaded
 local LOGO_FILES = { "fzzr.png", "Fzzr.png", "FZZR.png", "logo.png", "Logo.png", "fzzr_logo.png", "fzzr-logo.png", "FzzrLogo.png" }   -- tried in order under IMG_BASE
@@ -2626,7 +2633,7 @@ end
 --========================================================================
 -- HUD (screen space): backdrop, watermark, bind list, toasts
 --========================================================================
-local function bindActive(it, b)
+function bindActive(it, b)
     if b.mode == "Toggle" then return it.value end
     if b.mode == "Hold" then return kd[b.vk] and true or false end
     return false
@@ -3191,7 +3198,7 @@ function Lime:Run()
 end
 
 -- best-effort mouse wheel support (ignored silently if the API isn't available)
-local function hookWheel(hub)
+function hookWheel(hub)
     pcall(function()
         local UIS = game:GetService("UserInputService")
         UIS.InputChanged:Connect(function(input)
@@ -3208,6 +3215,7 @@ local function hookWheel(hub)
         end)
     end)
 end
+end   -- end of scoped block B (frame drawing / HUD / step)
 
 --========================================================================
 -- Common tab: built in, always the last category. Settings (Configs / Display / Notifications) and Players.
