@@ -64,7 +64,7 @@ local RED = rgb(255, 77, 77)         -- bad ping / low FPS (was a new table ever
 --   textDX / textDY        : move the text in pixels (negative = left / up) if it still looks off
 --   font                   : true = system bold;  faux = draws the text twice 1px apart (blurry, off by default)
 -- FPS and ping pills reserve the width of "000 FPS" / "000 ms", so they no longer grow and shrink as the numbers change.
-local TAG_STYLE = { font = true, faux = false, size = 12, widthScale = 1.08, padX = 10, dotGap = 5, height = 22,
+local TAG_STYLE = { font = true, faux = false, size = 12, widthScale = 1.02, padX = 9, dotGap = 5, height = 19,
     textDX = 0, textDY = -1 }
 -- mix() returns a table from a ring buffer instead of allocating one: every caller consumes the
 -- result immediately (setcol copies the numbers), so reuse is safe and creates no garbage.
@@ -1618,7 +1618,13 @@ function Lime:Tag(text, col, keepCase)
     self.tagN = (self.tagN or 0) + 1
     text = tostring(text)
     return self:SetPill("tag" .. self.tagN, { Text = keepCase and text or string.upper(text), Color = col or { 1, 1, 1 },
-        Order = 100 + self.tagN, Side = true })     -- Side: drawn under the logo (see drawWindow), not in the header
+        Order = 100 + self.tagN })
+end
+-- Text shown next to the script version under the logo, e.g. "v1.0.0 · core 0.0.5". Default is "core <this core's version>" in the
+-- dim version colour; a script can change the text and give it a colour (orange = warning):  Window:SetVersionNote("core 0.0.4", Color3)
+-- Window:SetVersionNote("") hides it.
+function Lime:SetVersionNote(text, col)
+    self.verNote = { text = text and tostring(text) or "", col = col and toCol(col) or nil }
 end
 
 -- Copies text to the clipboard and shows a toast with the result.
@@ -2544,6 +2550,20 @@ local function drawFooter(hub)
     end
 end
 
+-- "v1.0.0" (the script's version) with the version note next to it ("core 0.0.5", see Lime:SetVersionNote)
+local function drawVersion(hub, x, y, z)
+    local vcol = mix(C.dim, C.bg, 0.4)
+    local vtxt = "v" .. hub.version
+    Txt(hub, "ver", vtxt, x, y, vcol, 1, z, 11, true)
+    local vn = hub.verNote
+    local ntext = vn and vn.text or ("core " .. VERSION)
+    if ntext ~= "" then
+        local nx = x + tw(vtxt, 11) * 1.05 + 11
+        Circ(hub, "verdot", nx - 5.5, y, 1.2, vcol, 1, z, true)
+        Txt(hub, "vernote", ntext, nx, y, (vn and vn.col) or vcol, 1, z, 11, true)
+    end
+end
+
 local function drawWindow(hub)
     -- soft drop shadow: 9 stacked layers whose alpha fades toward the outside, so the stacked
     -- result is a smooth falloff instead of 5 hard bands. Shifted slightly down for depth.
@@ -2579,10 +2599,10 @@ local function drawWindow(hub)
         set(d, "Transparency", floor(GA * 100 + 0.5) / 100)
         set(d, "ZIndex", 17)
         show(d)
-        Txt(hub, "ver", "v" .. hub.version, 16, LTOP + LOGO_DH + 8, mix(C.dim, C.bg, 0.4), 1, 17, 10, true)
+        drawVersion(hub, 16, LTOP + LOGO_DH + 8, 17)
     else
         Txt(hub, "title", hub.title, 20, 28, C.text, 1, 16, 24, true)
-        Txt(hub, "ver", "v" .. hub.version, 20 + tw(hub.title, 24) + 6, 34, mix(C.dim, C.bg, 0.4), 1, 16, 10, true)
+        drawVersion(hub, 20 + tw(hub.title, 24) + 6, 34, 16)
     end
 
     -- build tags (Lime:Tag / AddTag): plain coloured text under the logo and version instead of header pills. They wrap onto
