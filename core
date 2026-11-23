@@ -59,14 +59,13 @@ local WARN_INK = rgb(36, 20, 6)    -- dark colour of the "!" drawn on top of the
 local RED = rgb(255, 77, 77)         -- bad ping / low FPS (was a new table every frame)
 
 -- Look of the header pills (build tags, FPS, ping, config chip). Override with CreateWindow({ TagStyle = {...} }).
--- If the text looks off-centre, nudge widthScale (a bit up = more room for the text).
--- textDX / textDY nudge the text in pixels (negative = left / up) if it still looks off.
--- font: true = system bold (sizes behave predictably); faux = draws the text twice, 1px apart, for extra weight.
-local TAG_STYLE = { font = true, faux = true, size = 10, widthScale = 1.1, padX = 8, dotGap = 4, height = 16,
-    textDX = 0, textDY = -1.5 }
--- NOTE: the text did not visibly shrink below size 10 (the drawing layer seems to have a minimum size),
--- so the pill is sized for 10. For smaller-looking letters try font = Drawing.Fonts.Pixel or Drawing.Fonts.UI
--- (set faux = false for those) and re-tune widthScale.
+--   height / padX / dotGap : pill size; the text is centred in the space after the dot
+--   widthScale             : nudge up if the text looks cramped, down if the pill looks too wide
+--   textDX / textDY        : move the text in pixels (negative = left / up) if it still looks off
+--   font                   : true = system bold;  faux = draws the text twice 1px apart (blurry, off by default)
+-- FPS and ping pills reserve the width of "000 FPS" / "000 ms", so they no longer grow and shrink as the numbers change.
+local TAG_STYLE = { font = true, faux = false, size = 10, widthScale = 1.08, padX = 9, dotGap = 5, height = 18,
+    textDX = 0, textDY = -1 }
 -- mix() returns a table from a ring buffer instead of allocating one: every caller consumes the
 -- result immediately (setcol copies the numbers), so reuse is safe and creates no garbage.
 local MIXN, MIXI = 1024, 0
@@ -156,18 +155,17 @@ end
 -- Themes (all colors are animated toward the active theme)
 --========================================================================
 local THEMES = {
-    { name = "Fzzr",            bg = rgb(17, 15, 19),  side = rgb(22, 19, 24),  group = rgb(26, 22, 29),  border = rgb(52, 44, 55),  text = rgb(248, 240, 244), dim = rgb(143, 128, 137), accent = rgb(255, 168, 192) },
-    { name = "Fzzr Noir",       bg = rgb(12, 11, 13),  side = rgb(16, 15, 17),  group = rgb(20, 18, 21),  border = rgb(44, 38, 44),  text = rgb(246, 238, 242), dim = rgb(130, 118, 126), accent = rgb(255, 84, 144) },
-    { name = "Fzzr Rose",       bg = rgb(26, 16, 21),  side = rgb(32, 20, 26),  group = rgb(37, 24, 31),  border = rgb(68, 44, 56),  text = rgb(250, 238, 243), dim = rgb(160, 124, 139), accent = rgb(255, 122, 166) },
-    { name = "Fzzr Bubblegum",  bg = rgb(22, 17, 30),  side = rgb(27, 21, 37),  group = rgb(32, 25, 43),  border = rgb(62, 48, 80),  text = rgb(248, 240, 252), dim = rgb(144, 124, 162), accent = rgb(255, 134, 210) },
-    { name = "Fzzr Sakura",     bg = rgb(28, 22, 25),  side = rgb(34, 27, 30),  group = rgb(39, 31, 35),  border = rgb(72, 58, 64),  text = rgb(250, 242, 244), dim = rgb(158, 138, 146), accent = rgb(248, 184, 200) },
-    { name = "Fzzr Neon",       bg = rgb(13, 9, 15),   side = rgb(18, 12, 20),  group = rgb(22, 15, 25),  border = rgb(52, 32, 54),  text = rgb(255, 240, 247), dim = rgb(138, 110, 128), accent = rgb(255, 46, 126) },
+    { name = "Fzzr Signature",  bg = rgb(17, 15, 19),  side = rgb(22, 19, 24),  group = rgb(26, 22, 29),  border = rgb(52, 44, 55),  text = rgb(248, 240, 244), dim = rgb(143, 128, 137), accent = rgb(255, 168, 192) },
+    { name = "Fzzr Signature - Noir",       bg = rgb(12, 11, 13),  side = rgb(16, 15, 17),  group = rgb(20, 18, 21),  border = rgb(44, 38, 44),  text = rgb(246, 238, 242), dim = rgb(130, 118, 126), accent = rgb(255, 84, 144) },
+    { name = "Fzzr Signature - Rose",       bg = rgb(26, 16, 21),  side = rgb(32, 20, 26),  group = rgb(37, 24, 31),  border = rgb(68, 44, 56),  text = rgb(250, 238, 243), dim = rgb(160, 124, 139), accent = rgb(255, 122, 166) },
+    { name = "Fzzr Signature - Bubblegum",  bg = rgb(22, 17, 30),  side = rgb(27, 21, 37),  group = rgb(32, 25, 43),  border = rgb(62, 48, 80),  text = rgb(248, 240, 252), dim = rgb(144, 124, 162), accent = rgb(255, 134, 210) },
+    { name = "Fzzr Signature - Sakura",     bg = rgb(28, 22, 25),  side = rgb(34, 27, 30),  group = rgb(39, 31, 35),  border = rgb(72, 58, 64),  text = rgb(250, 242, 244), dim = rgb(158, 138, 146), accent = rgb(248, 184, 200) },
+    { name = "Fzzr Signature - Neon",       bg = rgb(13, 9, 15),   side = rgb(18, 12, 20),  group = rgb(22, 15, 25),  border = rgb(52, 32, 54),  text = rgb(255, 240, 247), dim = rgb(138, 110, 128), accent = rgb(255, 46, 126) },
     { name = "Default",         bg = rgb(18, 18, 23),  side = rgb(22, 22, 28),  group = rgb(25, 25, 32),  border = rgb(46, 46, 58),  text = rgb(236, 236, 244), dim = rgb(122, 122, 140), accent = rgb(112, 118, 255) },
     { name = "Gruvbox",         bg = rgb(40, 40, 40),  side = rgb(50, 48, 47),  group = rgb(46, 44, 43),  border = rgb(80, 73, 69),  text = rgb(235, 219, 178), dim = rgb(146, 131, 116), accent = rgb(250, 189, 47) },
     { name = "Everforest",      bg = rgb(45, 53, 59),  side = rgb(52, 63, 68),  group = rgb(50, 60, 65),  border = rgb(71, 82, 88),  text = rgb(211, 198, 170), dim = rgb(133, 146, 137), accent = rgb(167, 192, 128) },
     { name = "Kanagawa",        bg = rgb(31, 31, 40),  side = rgb(22, 22, 29),  group = rgb(36, 36, 47),  border = rgb(54, 54, 70),  text = rgb(220, 215, 186), dim = rgb(114, 113, 105), accent = rgb(126, 156, 216) },
     { name = "Catppuccin Mocha",bg = rgb(30, 30, 46),  side = rgb(24, 24, 37),  group = rgb(36, 36, 54),  border = rgb(69, 71, 90),  text = rgb(205, 214, 244), dim = rgb(127, 132, 156), accent = rgb(203, 166, 247) },
-    { name = "Custom",          bg = rgb(18, 16, 20),  side = rgb(23, 20, 25),  group = rgb(27, 24, 30),  border = rgb(54, 46, 58),  text = rgb(244, 238, 242), dim = rgb(146, 132, 142), accent = rgb(255, 168, 192) },
     { name = "Oxocarbon",       bg = rgb(16, 17, 20),  side = rgb(21, 22, 26),  group = rgb(23, 24, 28),  border = rgb(40, 42, 48),  text = rgb(236, 238, 241), dim = rgb(128, 132, 140), accent = rgb(32, 201, 190) },
 }
 local C, Tgt = {}, {}
@@ -175,16 +173,19 @@ local TOKENS = { "bg", "side", "group", "border", "text", "dim", "accent" }
 local themeSettled = false
 C.track, C.hover, C.sel, C.popup, C.knob = { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }
 C.white, C.black, C.onacc = { 1, 1, 1 }, { 0, 0, 0 }, { 1, 1, 1 }
+local function setTheme(t, instant)
+    for _, k in ipairs(TOKENS) do
+        local v = t[k]
+        Tgt[k] = v
+        if instant or not C[k] then C[k] = { v[1], v[2], v[3] } end
+    end
+    themeSettled = false
+end
+-- name = theme name, or a theme table (the editor's live preview)
 local function applyTheme(name, instant)
+    if type(name) == "table" then setTheme(name, instant); return end
     for _, t in ipairs(THEMES) do
-        if t.name == name then
-            for _, k in ipairs(TOKENS) do
-                local v = t[k]
-                Tgt[k] = v
-                if instant or not C[k] then C[k] = { v[1], v[2], v[3] } end
-            end
-            themeSettled = false
-        end
+        if t.name == name then setTheme(t, instant); return end
     end
 end
 local function deriveTheme()
@@ -215,7 +216,7 @@ local function stepTheme()
     end
     deriveTheme()
 end
-applyTheme("Fzzr", true)
+applyTheme("Fzzr Signature", true)
 stepTheme()
 
 --========================================================================
@@ -827,11 +828,15 @@ do
         Txt(p, "ti", w.label, x + 12, y + 18, C.text, 1, z, 13.5, true)
 
         -- gear -> "Advanced" side panel
-        local gh = hot(x + p.w - 30, y + 6, 22, 22)
-        local ga = ani(p, "gh", gh and 1 or 0, 14)
-        if gh and M.pressed then p.adv = not p.adv end
-        Icon(p, "gear", "gear", x + p.w - 19, y + 17, 14, mix(C.dim, C.accent, p.adv and 1 or ga), 1, z + 2)
-        p.exw = ani(p, "exw", p.adv and 196 or 0, 16)
+        if w.noAdv then
+            p.exw = 0
+        else
+            local gh = hot(x + p.w - 30, y + 6, 22, 22)
+            local ga = ani(p, "gh", gh and 1 or 0, 14)
+            if gh and M.pressed then p.adv = not p.adv end
+            Icon(p, "gear", "gear", x + p.w - 19, y + 17, 14, mix(C.dim, C.accent, p.adv and 1 or ga), 1, z + 2)
+            p.exw = ani(p, "exw", p.adv and 196 or 0, 16)
+        end
 
         -- saturation / value field (cell grid, Drawing has no gradients)
         local ax, ay, aw, ah = x + 12, y + 34, p.w - 24, 110
@@ -931,7 +936,7 @@ do
 end
 
 local Kinds = {}
-for _, k in ipairs({ "switch", "slider", "choice", "multi", "popover", "keypill", "entry", "buttons", "themes", "caption", "chip", "chips", "tabs", "preview", "plist", "notice", "stats" }) do
+for _, k in ipairs({ "switch", "slider", "choice", "multi", "popover", "keypill", "entry", "buttons", "themes", "caption", "chip", "chips", "tabs", "preview", "plist", "notice", "stats", "swatch" }) do
     Kinds[k] = {}
     Kinds[k].mt = { __index = Kinds[k] }
 end
@@ -1142,35 +1147,105 @@ function Kinds.buttons.draw(w, x, y, wd, z)
     end
 end
 
--- Theme list -----------------------------------------------------------
+-- Theme list (scrollable) ------------------------------------------------
+-- Shows TH_VIS rows at a time; the rest scrolls (mouse wheel over the list, or drag its scrollbar).
+-- Only the visible rows are drawn, and rows fade out as they reach the top / bottom edge.
+local TH_ROW, TH_VIS = 22, 7
+local WHEELW, WHEELF = nil, -1                    -- scrollable list the mouse is over (mouse wheel target) + the frame it was seen
+local function themeMaxScroll() return max(0, (#THEMES - TH_VIS) * TH_ROW) end
 function Kinds.themes.Get(w) return THEMES[w.value].name end
 function Kinds.themes.Set(w, i)
+    i = clamp(floor(i), 1, #THEMES)
     w.value = i
+    w.reveal = true                                -- scroll the picked row into view
     applyTheme(THEMES[i].name)
     w.hub.themeName = THEMES[i].name
     if w.callback then w.callback(THEMES[i].name) end
 end
 function Kinds.themes.draw(w, x, y, wd, z)
+    local n = #THEMES
+    if w.value > n then w.value = n end
     Txt(w, "l", "Theme", x, y + 13, C.text, 1, z, 12.5, true)
-    Txt(w, "v", THEMES[w.value].name, x + wd, y + 13, C.text, 1, z, 12.5, true, "r")
-    local ly, lh = y + 30, #THEMES * 22 + 8
+    Txt(w, "v", fit(THEMES[w.value].name, wd - 70, 12.5), x + wd, y + 13, C.text, 1, z, 12.5, true, "r")
+    local viewH = TH_VIS * TH_ROW
+    local ly, lh = y + 30, viewH + 8
+    local maxS = themeMaxScroll()
     Box2(w, "lb", x, ly, wd, lh, C.bg, C.border, 1, z, 6)
-    local hy = ani(w, "hy", (w.value - 1) * 22, 16)
-    Rect(w, "hl", x + 3, ly + 4 + hy, wd - 6, 22, C.sel, 1, z + 2, true, 4)
-    Rect(w, "bar", x + 3, ly + 8 + hy, 2.5, 14, C.accent, 1, z + 3, true, 1)
-    for i, t in ipairs(THEMES) do
-        local ry = ly + 4 + (i - 1) * 22
-        local hv = hot(x + 3, ry, wd - 6, 22)
+
+    if w.reveal then
+        w.reveal = nil
+        local rt = (w.value - 1) * TH_ROW
+        local t = w.sT or 0
+        if rt < t then t = rt elseif rt + TH_ROW > t + viewH then t = rt + TH_ROW - viewH end
+        w.sT = t
+    end
+    w.sT = clamp(w.sT or 0, 0, maxS)
+    local sc = ani(w, "sc", w.sT, 16)
+    if hot(x, ly, wd, lh) then WHEELW, WHEELF = w, frameId end
+
+    -- rows live inside their own clip band (intersected with the page's clip)
+    local top, bot = ly + 4, ly + 4 + viewH
+    local oc0, oc1 = CLIP0, CLIP1
+    CLIP0 = oc0 and max(oc0, top) or top
+    CLIP1 = oc1 and min(oc1, bot) or bot
+    local base = top - sc
+    local rw = wd - 6 - (maxS > 0 and 8 or 0)
+    local hy = ani(w, "hy", (w.value - 1) * TH_ROW, 16)
+    Rect(w, "hl", x + 3, base + hy, rw, TH_ROW, C.sel, 1, z + 2, true, 4)
+    Rect(w, "bar", x + 3, base + hy + 4, 2.5, 14, C.accent, 1, z + 3, true, 1)
+
+    local first = max(1, floor(sc / TH_ROW) + 1)
+    local last = min(n, floor((sc + viewH) / TH_ROW) + 1)
+    local save = GA
+    for i = first, last do
+        local t = THEMES[i]
+        local ry = base + (i - 1) * TH_ROW
+        local mid = ry + TH_ROW / 2
+        GA = save * clamp((bot - mid) / 12, 0, 1) * clamp((mid - top) / 12, 0, 1)
+        local hv = hot(x + 3, ry, rw, TH_ROW)
         local ha = ani(w, kk("h", i), hv and 1 or 0, 14)
         if hv and M.pressed then w:Set(i) end
         local sel = (w.value == i)
         local sa = ani(w, kk("s", i), sel and 1 or 0, 14)
-        if ha > 0.02 and not sel then Rect(w, kk("hv", i), x + 3, ry, wd - 6, 22, C.hover, ha, z + 1, true, 4) end
+        if ha > 0.02 and not sel then Rect(w, kk("hv", i), x + 3, ry, rw, TH_ROW, C.hover, ha, z + 1, true, 4) end
         Txt(w, kk("t", i), t.name, x + 14 + 14 * sa, ry + 11, mix(C.dim, C.text, max(sa, ha)), 1, z + 4, 12, sel)
+        Circ(w, kk("sw", i), x + rw - 6, ry + 11, 3.5, t.accent, 1, z + 4, true)       -- accent preview dot
         if sa > 0.02 then
             Tri(w, kk("ar", i), x + 13, ry + 7, x + 13, ry + 15, x + 20, ry + 11, C.accent, sa, z + 4)
         end
     end
+    GA = save
+    CLIP0, CLIP1 = oc0, oc1
+
+    if maxS > 0 then
+        local thumbH = max(18, viewH * viewH / (viewH + maxS))
+        local thumbY = top + (viewH - thumbH) * clamp(sc / maxS, 0, 1)
+        local sh = hot(x + wd - 13, top, 11, viewH)
+        local bar = w.sbar
+        if not bar then bar = {}; w.sbar = bar end
+        if sh and M.pressed and not dragOwner then dragOwner = bar end
+        if dragOwner == bar then
+            if M.down then w.sT = clamp((M.y - top - thumbH / 2) / (viewH - thumbH), 0, 1) * maxS else dragOwner = nil end
+        end
+        local sba = ani(w, "sba", (sh or dragOwner == bar) and 1 or 0, 14)
+        Rect(w, "sbt", x + wd - 9, top, 2, viewH, C.track, 0.3, z + 3, true, 1)
+        Rect(w, "sbh", x + wd - 9 - sba, thumbY, 2 + sba * 1.5, thumbH, mix(C.accent, C.bg, 0.4), 0.5 + 0.4 * sba, z + 4, true, 1)
+    end
+end
+
+-- Swatch: label + colour box that opens the colour picker (used by the theme editor) --------------
+function Kinds.swatch.Get(w) return w.color end
+function Kinds.swatch.Set(w, v) end
+function Kinds.swatch.draw(w, x, y, wd, z)
+    local cy = y + 13
+    Txt(w, "l", w.label, x, cy, C.text, 1, z, 12.5, true)
+    local bw = 46
+    local bx = x + wd - bw
+    local hv = hot(bx, cy - 9, bw, 18)
+    local ha = ani(w, "h", hv and 1 or 0, 14)
+    Rect(w, "b", bx - ha, cy - 9 - ha, bw + 2 * ha, 18 + 2 * ha, mix(C.border, C.accent, ha * 0.8), 1, z, true, 6)
+    Rect(w, "c", bx + 1, cy - 8, bw - 2, 16, w.color, 1, z + 1, true, 5)
+    if hv and M.pressed then openSwatchPop(w, bx + bw - 210, cy + 12) end
 end
 
 -- Notice (unsaved-changes status) ------------------------------------------
@@ -1390,8 +1465,12 @@ function BoxAPI:Buttons(list)
 end
 function BoxAPI:ThemeList(id, callback)
     local idx = 1
-    for i, t in ipairs(THEMES) do if t.name == "Fzzr" then idx = i end end
-    return addRow(self, newItem("themes", { id = id, value = idx, callback = callback, h = 30 + #THEMES * 22 + 14 }))
+    for i, t in ipairs(THEMES) do if t.name == "Fzzr Signature" then idx = i end end
+    return addRow(self, newItem("themes", { id = id, value = idx, callback = callback, h = 30 + TH_VIS * TH_ROW + 8 + 6 }))
+end
+function BoxAPI:Swatch(id, label, col)
+    return addRow(self, newItem("swatch", { id = id, label = label, color = { col.R, col.G, col.B }, alpha = 1, anim = 1, speed = 100,
+        h = 26, noAdv = true }))
 end
 function BoxAPI:Caption(text) return addRow(self, newItem("caption", { text = text, h = 24 })) end
 -- status line that reads hub.dirty: orange "!  Unsaved changes" or a dim "All changes saved"
@@ -1438,23 +1517,6 @@ Lime.__index = Lime
 function Lime:Get(id) local it = self.items[id]; if it then return it:Get() end end
 function Lime:Set(id, v) local it = self.items[id]; if it then it:Set(v) end end
 -- returns Color3, alpha for any switch created with { color = ... }
--- recolours the "Custom" theme from its three pickers (only while that theme is selected)
-local function syncCustom(hub)
-    local ct
-    for _, t in ipairs(THEMES) do if t.name == "Custom" then ct = t end end
-    local a, b, t = hub.items.ct_accent, hub.items.ct_bg, hub.items.ct_text
-    if not (ct and a and b and t) then return end
-    local sig = a.color[1] + a.color[2] * 3 + a.color[3] * 7 + b.color[1] * 11 + b.color[2] * 13 + b.color[3] * 17 + t.color[1] * 19 + t.color[2] * 23 + t.color[3] * 29
-    if hub.ctSig == sig then return end
-    hub.ctSig = sig
-    local function mk(from, to, k) return { from[1] + (to[1] - from[1]) * k, from[2] + (to[2] - from[2]) * k, from[3] + (to[3] - from[3]) * k } end
-    ct.bg = { b.color[1], b.color[2], b.color[3] }
-    ct.text = { t.color[1], t.color[2], t.color[3] }
-    ct.accent = { a.color[1], a.color[2], a.color[3] }
-    ct.side = mk(ct.bg, ct.text, 0.03); ct.group = mk(ct.bg, ct.text, 0.06)
-    ct.border = mk(ct.bg, ct.text, 0.17); ct.dim = mk(ct.bg, ct.text, 0.58)
-    applyTheme("Custom")
-end
 function Lime:GetColor(id)
     local it = self.items[id]
     if it and it.color then return Color3.new(it.color[1], it.color[2], it.color[3]), it.alpha end
@@ -1550,7 +1612,7 @@ function Lime:Serialize(forCompare)
     for _ in pairs(self.items) do count = count + 1 end
     if not ids or self.sortedCount ~= count then
         ids = {}
-        for id in pairs(self.items) do if not CFG_SKIP[id] then ids[#ids + 1] = id end end
+        for id in pairs(self.items) do if not CFG_SKIP[id] and id:sub(1, 3) ~= "te_" then ids[#ids + 1] = id end end
         table.sort(ids)
         self.sortedIds, self.sortedCount = ids, count
     end
@@ -1560,7 +1622,8 @@ function Lime:Serialize(forCompare)
         local k, v = w.kind, nil
         if k == "switch" or k == "chip" then v = w.value and "1" or "0"
         elseif k == "slider" then v = numStr(w.value)
-        elseif k == "choice" or k == "themes" or k == "tabs" or k == "keypill" then v = tostring(w.value)
+        elseif k == "themes" then v = THEMES[w.value].name          -- by name: the list changes when custom themes are added
+        elseif k == "choice" or k == "tabs" or k == "keypill" then v = tostring(w.value)
         elseif k == "multi" then
             local t = {}
             for _, n in ipairs(w.items) do if w.set[n] then t[#t + 1] = n end end
@@ -1589,14 +1652,17 @@ function Lime:Apply(text)
         local tag, id
         if key then tag, id = key:match("^(%a):(.+)$") end
         local w = id and self.items[id]
-        if w and not CFG_SKIP[id] then
+        if w and not CFG_SKIP[id] and id:sub(1, 3) ~= "te_" then
             local k = w.kind
             if tag == "v" then
                 local n = tonumber(val)
                 if k == "switch" or k == "chip" then w:Set(val == "1")
                 elseif k == "slider" or k == "keypill" then if n then w:Set(n) end
                 elseif k == "choice" then if n and w.items[n] then w:Set(n) end
-                elseif k == "themes" then if n and THEMES[n] then w:Set(n) end
+                elseif k == "themes" then
+                    local idx = n                                       -- old configs saved an index, new ones the name
+                    if not idx then for i, t in ipairs(THEMES) do if t.name == val then idx = i end end end
+                    if idx and THEMES[idx] then w:Set(idx) end
                 elseif k == "tabs" then if n and w.opts[n] then w:Set(n) end
                 elseif k == "multi" then
                     local set = {}
@@ -1741,6 +1807,142 @@ function Lime:CfgTick(now)
     if dirty and self.cfgName and self:Get("auto_save") and now - (self.dirtyAt or now) > 1.5 then
         self:CfgSave(self.cfgName)
     end
+end
+
+--========================================================================
+-- Your own themes: made in Settings > Display > Themes (Create / Edit / Delete), kept in fzzr_themes.txt
+--========================================================================
+local THEME_FILE = "fzzr_themes.txt"
+local function themeIndex(name)
+    for i, t in ipairs(THEMES) do if t.name == name then return i end end
+end
+-- a theme from three colours: the other tokens are blended from background and text
+local function themeFrom(name, acc, bg, txt)
+    local function mk(k)
+        return { bg[1] + (txt[1] - bg[1]) * k, bg[2] + (txt[2] - bg[2]) * k, bg[3] + (txt[3] - bg[3]) * k }
+    end
+    return { name = name, custom = true,
+        bg = { bg[1], bg[2], bg[3] }, text = { txt[1], txt[2], txt[3] }, accent = { acc[1], acc[2], acc[3] },
+        side = mk(0.03), group = mk(0.06), border = mk(0.17), dim = mk(0.58) }
+end
+local function colSig(a, b, t)
+    return a[1] + a[2] * 3 + a[3] * 7 + b[1] * 11 + b[2] * 13 + b[3] * 17 + t[1] * 19 + t[2] * 23 + t[3] * 29
+end
+
+local function themesSave()
+    if not fsOK() then return end
+    local out = {}
+    for _, t in ipairs(THEMES) do
+        if t.custom then
+            out[#out + 1] = string.format("%s\t%.4f,%.4f,%.4f\t%.4f,%.4f,%.4f\t%.4f,%.4f,%.4f", t.name,
+                t.accent[1], t.accent[2], t.accent[3], t.bg[1], t.bg[2], t.bg[3], t.text[1], t.text[2], t.text[3])
+        end
+    end
+    pcall(writefile, THEME_FILE, table.concat(out, "\n"))
+end
+
+function Lime:ThemesLoad()
+    if not fsOK() or not isfile(THEME_FILE) then return end
+    local ok, txt = pcall(readfile, THEME_FILE)
+    if not ok or type(txt) ~= "string" then return end
+    local function col(str)
+        local r, g, b = (str or ""):match("^([%d%.%-]+),([%d%.%-]+),([%d%.%-]+)$")
+        if r then return { tonumber(r), tonumber(g), tonumber(b) } end
+    end
+    for line in txt:gmatch("[^\r\n]+") do
+        local name, a, b, t = line:match("^([^\t]+)\t([^\t]+)\t([^\t]+)\t([^\t]+)$")
+        local ac, bg, tx = col(a), col(b), col(t)
+        if name and ac and bg and tx and not themeIndex(name) then THEMES[#THEMES + 1] = themeFrom(name, ac, bg, tx) end
+    end
+end
+
+-- the editor popup (name + three colours) is built once and reused
+function Lime:ThemeEditorInit()
+    local hub = self
+    local box = newBox(hub, "Theme")
+    box.inPopup = true
+    local te = { box = box, active = false }
+    te.name = box:Entry("te_name", "Name", "My theme")
+    te.a = box:Swatch("te_accent", "Accent", Color3.new(1, 0.66, 0.75))
+    te.b = box:Swatch("te_bg", "Background", Color3.new(0.07, 0.06, 0.08))
+    te.t = box:Swatch("te_text", "Text", Color3.new(0.97, 0.94, 0.96))
+    box:Buttons({
+        { "Save", function() hub:ThemeEditorSave() end },
+        { "Cancel", function() TI.owner = nil; closePop() end },
+    })
+    te.owner = { title = "New Theme", sub = box, pw = 244 }
+    hub.te = te
+end
+
+-- base = theme whose colours the editor starts from; editing = the custom theme being changed (nil = a new theme)
+function Lime:ThemeEdit(base, editing)
+    local te, list = self.te, self.items.theme
+    local function put(w, c) w.color[1], w.color[2], w.color[3] = c[1], c[2], c[3]; w.hsv = nil end
+    put(te.a, base.accent); put(te.b, base.bg); put(te.t, base.text)
+    te.name.text = editing and editing.name or ""
+    te.editing = editing
+    te.owner.title = editing and "Edit Theme" or "New Theme"
+    te.prevName = THEMES[list.value].name
+    te.saved, te.active = false, true
+    te.sig = colSig(te.a.color, te.b.color, te.t.color)      -- the preview starts once a colour actually changes
+    openSubPop(te.owner, SW + floor((W - SW - te.owner.pw) / 2), 100)
+end
+
+-- while the editor is open the theme follows the three colours live; closing it without saving restores the old theme
+function Lime:ThemeEditorTick()
+    local te = self.te
+    if POP and POP.owner == te.owner and not POP.closing then
+        local a, b, t = te.a.color, te.b.color, te.t.color
+        local sig = colSig(a, b, t)
+        if sig ~= te.sig then te.sig = sig; applyTheme(themeFrom("preview", a, b, t)) end
+    else
+        te.active = false
+        if not te.saved then applyTheme(te.prevName) end
+    end
+end
+
+function Lime:ThemeEditorSave()
+    local te, list = self.te, self.items.theme
+    local name = (te.name.text or ""):match("^%s*(.-)%s*$")
+    if name == "" then self:Toast({ Title = "Give the theme a name", Icon = "info", Duration = 2.5 }); return end
+    local clash = themeIndex(name)
+    if clash and THEMES[clash] ~= te.editing then
+        self:Toast({ Title = "That name is already used", Text = name, Icon = "info", Duration = 2.5 })
+        return
+    end
+    local t = themeFrom(name, te.a.color, te.b.color, te.t.color)
+    local at
+    for i, x in ipairs(THEMES) do if x == te.editing then at = i end end
+    if at then THEMES[at] = t else THEMES[#THEMES + 1] = t; at = #THEMES end
+    themesSave()
+    te.saved = true
+    TI.owner = nil
+    closePop()
+    list:Set(at)
+    self:Toast({ Title = te.editing and "Theme updated" or "Theme created", Text = name, Icon = "check", Duration = 2.5 })
+end
+
+function Lime:ThemeCreate() self:ThemeEdit(THEMES[self.items.theme.value], nil) end
+
+function Lime:ThemeEditSelected()
+    local t = THEMES[self.items.theme.value]
+    if not t.custom then
+        self:Toast({ Title = "Built-in theme", Text = "Saving makes your own copy", Icon = "info", Duration = 2.5 })
+    end
+    self:ThemeEdit(t, t.custom and t or nil)
+end
+
+function Lime:ThemeDelete()
+    local list = self.items.theme
+    local t = THEMES[list.value]
+    if not t.custom then
+        self:Toast({ Title = "Built-in theme", Text = "Only your own themes can be deleted", Icon = "info", Duration = 2.5 })
+        return
+    end
+    table.remove(THEMES, list.value)
+    themesSave()
+    list:Set(1)
+    self:Toast({ Title = "Theme deleted", Text = t.name, Icon = "check", Duration = 2.5 })
 end
 
 function Lime:Destroy()
@@ -2113,21 +2315,23 @@ end
 
 -- One header pill: [dot] text. Its right edge sits at `right`; returns its left edge (nil if it would run into the
 -- search box, in which case nothing is drawn). Used by the build tags, the FPS / ping readouts and the config chip.
-local function headerPill(o, right, text, col, limit, dotCol, textCol)
+local function headerPill(o, right, text, col, limit, dotCol, textCol, minTxt)
     local S = TAG_STYLE
-    local txw = tw(text, S.size) * S.widthScale + (S.faux and 1 or 0)
-    local w_ = S.padX * 2 + 4.4 + S.dotGap + txw
+    local txw = tw(text, S.size) * S.widthScale
+    if minTxt and txw < minTxt then txw = minTxt end            -- fixed-width pills (FPS / ping)
+    local w_ = floor(S.padX * 2 + 4.4 + S.dotGap + txw + 0.5)
     local left = right - w_
     if left < limit then return nil end
     local hcy = HDR / 2
-    local ty = hcy - S.height / 2
+    local ty = floor(hcy - S.height / 2)
     local hv = hot(left, ty, w_, S.height)
     local ha = ani(o, "h", hv and 1 or 0, 14)
-    Box2(o, "bx", left, ty, w_, S.height, mix(C.group, col, 0.14 + 0.08 * ha), mix(C.border, col, 0.55 + 0.25 * ha), 1, 21, 6)
+    Box2(o, "bx", left, ty, w_, S.height, mix(C.group, col, 0.14 + 0.08 * ha), mix(C.border, col, 0.55 + 0.25 * ha), 1, 21, floor(S.height / 2))
     Circ(o, "dot", left + S.padX + 2.2, hcy, 2.2, dotCol or col, 1, 23, true)
-    local tx0 = left + S.padX + 4.4 + S.dotGap + S.textDX
-    Txt(o, "tx", text, tx0, hcy + 0.5 + S.textDY, textCol or col, 1, 23, S.size, S.font)
-    if S.faux then Txt(o, "tx2", text, tx0 + 1, hcy + 0.5 + S.textDY, textCol or col, 1, 23, S.size, S.font) end
+    -- the text is centred in the area after the dot, so any width-estimate error is shared evenly left and right
+    local tcx = left + S.padX + 4.4 + S.dotGap + txw / 2 + S.textDX
+    Txt(o, "tx", text, tcx, hcy + S.textDY, textCol or col, 1, 23, S.size, S.font, "c")
+    if S.faux then Txt(o, "tx2", text, tcx + 1, hcy + S.textDY, textCol or col, 1, 23, S.size, S.font, "c") end
     return left, hv
 end
 
@@ -2171,7 +2375,7 @@ local function drawHeader(hub)
         local t = hub.tags[i]
         local left = headerPill(t, right, t.text, t.col, limit)
         if not left then break end
-        right = left - 6
+        right = left - 5
     end
     if hub:Get("hdr_stats") ~= false then
         -- config chip: dot is dim with no config, accent when loaded, orange while there are unsaved changes
@@ -2180,7 +2384,7 @@ local function drawHeader(hub)
         local dot = mix(mix(C.dim, C.accent, hub.cfgName and 0.8 or 0), WARN, da)
         local left, chv = headerPill(hub.chip, right, name, mix(C.dim, WARN, da * 0.9), limit, dot, mix(C.dim, C.text, 0.35 + 0.4 * da))
         if left then
-            right = left - 6
+            right = left - 5
             if chv then hub.chipHot = true; if M.pressed then hub:Select(hub.alertPage) end end
         end
         -- ping + FPS refresh a couple of times per second (the width follows the text)
@@ -2192,12 +2396,14 @@ local function drawHeader(hub)
         local pms = hub.pingMs
         if pms then
             local pc = pms < 60 and C.accent or (pms < 120 and WARN or RED)
-            left = headerPill(hub.pingPill, right, hub.pingPillTxt, C.dim, limit, pc, mix(C.dim, C.text, 0.35))
-            if left then right = left - 6 end
+            left = headerPill(hub.pingPill, right, hub.pingPillTxt, C.dim, limit, pc, mix(C.dim, C.text, 0.35),
+                tw("000 ms", TAG_STYLE.size) * TAG_STYLE.widthScale)
+            if left then right = left - 5 end
         end
         if hub.fpsTxt then
             local fc = hub.fps >= 50 and C.accent or (hub.fps >= 30 and WARN or RED)
-            headerPill(hub.fpsPill, right, hub.fpsTxt, C.dim, limit, fc, mix(C.dim, C.text, 0.35))
+            headerPill(hub.fpsPill, right, hub.fpsTxt, C.dim, limit, fc, mix(C.dim, C.text, 0.35),
+                tw("000 FPS", TAG_STYLE.size) * TAG_STYLE.widthScale)
         end
     end
 end
@@ -2594,7 +2800,7 @@ local function step(hub)
     end
     PERF = hub:Get("perf_mode") == true
     hub.fps = lerp(hub.fps, 1 / DT, 0.05)
-    if hub.themeName == "Custom" then syncCustom(hub) end
+    if hub.te and hub.te.active then hub:ThemeEditorTick() end      -- live preview while the theme editor is open
     stepTheme()
 
     -- settings that drive the menu itself
@@ -2908,7 +3114,9 @@ local function hookWheel(hub)
         UIS.InputChanged:Connect(function(input)
             if hub.dead then return end
             if input.UserInputType == Enum.UserInputType.MouseWheel and hub.open then
-                if M.x >= 0 and M.x <= SW and M.y > HDR then        -- pointer over the sidebar: scroll the page list
+                if WHEELW and WHEELF >= frameId - 1 then            -- pointer over the theme list: scroll that list
+                    WHEELW.sT = clamp((WHEELW.sT or 0) - input.Position.Z * TH_ROW * 2, 0, themeMaxScroll())
+                elseif M.x >= 0 and M.x <= SW and M.y > HDR then    -- pointer over the sidebar: scroll the page list
                     hub.sideT = clamp(hub.sideT - input.Position.Z * 40, 0, hub.sideMax)
                 else
                     hub.scrollT = clamp(hub.scrollT - input.Position.Z * 48, 0, hub.maxScroll)
@@ -3062,18 +3270,12 @@ hud:Switch("wm", "Show Watermark", false, { tip = "Small bar on screen with your
 hud:Switch("bl", "Show Bind List", true)
 hud:Switch("bl_active", "Active Binds Only", true)
 hud:Choice("toast_pos", "Toast Position", { "Center Bottom", "Bottom Right", "Bottom Left", "Top Right", "Top Left" }, 1, { width = 112 })
-local cth = display:Box("Custom Theme", "Left")
-cth:Switch("ct_accent", "Accent", false, { color = Color3.fromRGB(255, 168, 192) })
-cth:Switch("ct_bg", "Background", false, { color = Color3.fromRGB(18, 16, 20) })
-cth:Switch("ct_text", "Text", false, { color = Color3.fromRGB(244, 238, 242) })
-cth:Caption("Pick the theme called Custom in the list. The colours apply live.")
 local thm = display:Box("Themes", "Right")
 thm:ThemeList("theme")
 thm:Buttons({
-    { "Create", function() hub:Toast({ Title = "Theme editor", Text = "Not built yet", Icon = "info", Duration = 2 }) end },
-    { "Delete", function() hub:Toast({ Title = "Theme editor", Text = "Not built yet", Icon = "info", Duration = 2 }) end },
-    { "Edit",   function() hub:Toast({ Title = "Theme editor", Text = "Not built yet", Icon = "info", Duration = 2 }) end },
-    { "Load",   function() hub:Set("theme", hub.items["theme"].value) end },
+    { "Create", function() hub:ThemeCreate() end },
+    { "Edit",   function() hub:ThemeEditSelected() end },
+    { "Delete", function() hub:ThemeDelete() end, full = true },
 })
 
 -- Settings > Notifications ---------------------------------------------
@@ -3127,7 +3329,9 @@ end
 function Lime:Init()
     if self.initialized then return self end
     self.initialized = true
+    self:ThemesLoad()                       -- your saved themes join the list before anything refers to it
     self:_BuildCommon()
+    self:ThemeEditorInit()
     self:CfgInit()                          -- fills the Saved list, applies the autoload config, takes the unsaved-changes baseline
     self:Select(self.pages[1])              -- first page the script created
     hookWheel(self)
