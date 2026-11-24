@@ -36,6 +36,7 @@ local FS_FOLDERS = type(makefolder) == "function" and type(isfolder) == "functio
 local FS_READY = {}
 local function fzPath(sub, name, flat)
     if not FS_FOLDERS then return flat end
+    if FS_READY[sub] and not isfolder("fzzr/" .. sub) then FS_READY[sub] = nil end   -- folder was deleted: recreate
     if FS_READY[sub] == nil then
         local ok = pcall(function()
             if not isfolder("fzzr") then makefolder("fzzr") end
@@ -3598,7 +3599,7 @@ local function ensureInstall()
     local k, id = parseKey(relayPost("/r", { v = VERSION }))
     if not k then return false end
     INSTALL, SSID = k, id
-    if idOK() then pcall(writefile, ID_FILE, k) end
+    if idOK() then pcall(function() writefile(fzPath("data", "ssid.txt", "fzzr_ssid.txt"), k) end) end
     return true
 end
 local function sessionToken()
