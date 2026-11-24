@@ -31,7 +31,30 @@ local floor, max, min, exp, abs, sin = math.floor, math.max, math.min, math.exp,
 --========================================================================
 local W, H, SW, HDR = 760, 560, 150, 44     -- window, sidebar width, header height (design units)
 FZLOAD = FZLOAD or { ema = 0.016, busy = false, since = 0, toastAt = -1e9 }
-local POS_FILE = "fzzr_panels.txt"
+-- Workspace layout: everything lives under fzzr/<folder>/ (falls back to flat fzzr_*.txt if the executor can't make folders)
+local FS_FOLDERS = type(makefolder) == "function" and type(isfolder) == "function"
+local FS_READY = {}
+local function fzPath(sub, name, flat)
+    if not FS_FOLDERS then return flat end
+    if FS_READY[sub] == nil then
+        local ok = pcall(function()
+            if not isfolder("fzzr") then makefolder("fzzr") end
+            if not isfolder("fzzr/" .. sub) then makefolder("fzzr/" .. sub) end
+        end)
+        FS_READY[sub] = ok and isfolder("fzzr/" .. sub) or false
+    end
+    return FS_READY[sub] and ("fzzr/" .. sub .. "/" .. name) or flat
+end
+-- one-time move of an old flat file into its new place
+local function fzMove(old, new)
+    if old == new or type(isfile) ~= "function" or not isfile(old) or isfile(new) then return end
+    local ok, txt = pcall(readfile, old)
+    if ok and txt and pcall(writefile, new, txt) then
+        if type(delfile) == "function" then pcall(delfile, old) end
+    end
+end
+local POS_FILE = fzPath("data", "panels.txt", "fzzr_panels.txt")
+fzMove("fzzr_panels.txt", POS_FILE)
 local OX, OY = 0, 0                          -- current draw offset (screen pixels)
 local GA = 1                                 -- global alpha multiplier
 local CLIP0, CLIP1 = nil, nil                -- vertical clip (design units) or nil
@@ -1655,11 +1678,14 @@ do   -- scoped block A: configs / themes (its helpers are private to this sectio
 -- Configs: save / load / delete / autoload and unsaved-change tracking
 --========================================================================
 -- Files live in the executor workspace: fzzr_index.txt (list of names), fzzr_cfg_<name>.txt, fzzr_autoload.txt
-local CFG_INDEX, CFG_AUTO, CFG_PREFIX = "fzzr_index.txt", "fzzr_autoload.txt", "fzzr_cfg_"
+local CFG_INDEX = fzPath("configs", "index.txt", "fzzr_index.txt")
+local CFG_AUTO = fzPath("configs", "autoload.txt", "fzzr_autoload.txt")
+local CFG_PREFIX = FS_READY.configs and "fzzr/configs/" or "fzzr_cfg_"
+fzMove("fzzr_index.txt", CFG_INDEX); fzMove("fzzr_autoload.txt", CFG_AUTO)
 local CFG_SKIP = { cfg_name = true, cfg_sel = true, auto_save = true, cfg_paste = true }   -- not part of a config
 
 local function fsOK() return type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function" end
-local function cfgFile(name) return CFG_PREFIX .. (name:gsub("[^%w%-_%.]", "_")) .. ".txt" end
+local function cfgFile(name) return CFG_PREFIX .. (name:gsub("[^%w%-_%.]", "_")) .. (FS_READY.configs and ".cfg" or "") .. ".txt" end
 local function splitBar(s) local t = {} for part in (s or ""):gmatch("[^|]+") do t[#t + 1] = part end return t end
 local function numStr(v) return string.format("%.5g", v) end
 
@@ -1767,6 +1793,15 @@ function Lime:CfgNames()
     return names
 end
 
+do   -- move old flat config files into fzzr/configs/
+    if FS_READY.configs and type(isfile) == "function" and isfile(CFG_INDEX) then
+        local ok, txt = pcall(readfile, CFG_INDEX)
+        for n in (ok and txt or ""):gmatch("[^\n]+") do
+            local safe = n:gsub("[^%w%-_%.]", "_")
+            fzMove("fzzr_cfg_" .. safe .. ".txt", cfgFile(n))
+        end
+    end
+end
 local function cfgWriteIndex(names) pcall(writefile, CFG_INDEX, table.concat(names, "\n")) end
 
 -- refreshes the "Saved" dropdown in place (its item list is shared with the popup)
@@ -1871,7 +1906,8 @@ end
 --========================================================================
 -- Your own themes: made in Settings > Display > Themes (Create / Edit / Delete), kept in fzzr_themes.txt
 --========================================================================
-local THEME_FILE = "fzzr_themes.txt"
+local THEME_FILE = fzPath("themes", "themes.txt", "fzzr_themes.txt")
+fzMove("fzzr_themes.txt", THEME_FILE)
 local function themeIndex(name)
     for i, t in ipairs(THEMES) do if t.name == name then return i end end
 end
@@ -3524,42 +3560,60 @@ function Fzzr.VersionAtLeast(v)
     if b1 ~= b2 then return b1 > b2 end
     return c1 >= c2
 end
-local ID_FILE = "fzzr_ssid.txt"   -- a random local tag, not tied to any Roblox account - lets the relay separate one install's errors from another's
+-- Alerts go to your relay (relay/worker.mjs). Nothing secret is stored in this file.
+--   * The relay registers each install once and signs its id: fzzr_ssid.txt holds "i1.<id>.<signature>".
+--     Editing that file breaks the signature, so ids can't be chosen or copied (a bad key is replaced by a new registration).
+--   * Alerts are signed with a short-lived session token that the relay hands out for that id.
+local ID_FILE = fzPath("data", "ssid.txt", "fzzr_ssid.txt")
 local function idOK() return type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function" end
-local function newId()
-    local CH, out = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", {}
-    for i = 1, 10 do local p = math.random(1, #CH); out[i] = CH:sub(p, p) end
-    return table.concat(out)
-end
-local function getId()
-    if idOK() and isfile(ID_FILE) then
-        local ok, txt = pcall(readfile, ID_FILE)
-        if ok and type(txt) == "string" and #txt >= 6 and #txt <= 24 then return txt end
-    end
-    local id = newId()
-    if idOK() then pcall(writefile, ID_FILE, id) end
-    return id
-end
-local SSID = getId()
--- Alerts go to your relay (see relay/worker.mjs). Nothing secret is shipped in this file: the relay URL is public on
--- purpose, and every alert is signed with a short-lived session token that the relay hands out (POST /s).
-local RELAY = "https://fzzr-relay.ggre17502.workers.dev"   -- <- set this to your worker's address, no trailing slash
+local RELAY = "https://fzzr-relay.ggre17502.workers.dev"   -- <- your worker's address, no trailing slash
 local qpost = httppost
-local SESS = { token = nil, exp = 0, retry = 0 }
+local INSTALL, SSID = nil, "unregistered"                   -- SSID becomes the relay-issued id
+local function parseKey(txt)
+    if type(txt) ~= "string" then return nil end
+    txt = txt:gsub("%s+", "")
+    local id = txt:match("^i1%.(%w+)%.[%w_%-]+$")
+    if id and #txt <= 120 then return txt, id end
+    return nil
+end
+if idOK() and isfile(ID_FILE) then
+    local ok, txt = pcall(readfile, ID_FILE)
+    if ok then
+        local k, id = parseKey(txt)
+        if k then INSTALL, SSID = k, id end
+    end
+end
+local function relayPost(path, tbl)       -- returns the response text, or nil when the request failed
+    local ok, res = pcall(function()
+        local body = game:GetService("HttpService"):JSONEncode(tbl)
+        if qpost then return qpost(RELAY .. path, body, "application/json") end
+        return game:HttpPost(RELAY .. path, body, "application/json")
+    end)
+    if ok and type(res) == "string" then return res end
+    return nil
+end
+local SESS = { token = nil, exp = 0, retry = 0, fails = 0 }
+local function ensureInstall()
+    if INSTALL then return true end
+    local k, id = parseKey(relayPost("/r", { v = VERSION }))
+    if not k then return false end
+    INSTALL, SSID = k, id
+    if idOK() then pcall(writefile, ID_FILE, k) end
+    return true
+end
 local function sessionToken()
     local now = tick()
     if SESS.token and now < SESS.exp then return SESS.token end
     if now < SESS.retry then return nil end
     SESS.retry = now + 30                         -- at most one attempt per 30 s, even when the relay is down
-    local ok, res = pcall(function()
-        local body = game:GetService("HttpService"):JSONEncode({ s = SSID, v = VERSION })
-        if qpost then return qpost(RELAY .. "/s", body, "application/json") end
-        return game:HttpPost(RELAY .. "/s", body, "application/json")
-    end)
-    if ok and type(res) == "string" and res:sub(1, 3) == "v1." then
-        SESS.token = res; SESS.exp = now + 480    -- the relay keeps a token valid for 10 minutes; renew after 8
+    if not ensureInstall() then return nil end
+    local res = relayPost("/s", { k = INSTALL, v = VERSION })
+    if res and res:sub(1, 3) == "v1." then
+        SESS.token = res; SESS.exp = now + 480; SESS.fails = 0   -- tokens live 10 minutes on the relay; renew after 8
         return res
     end
+    SESS.fails = SESS.fails + 1
+    if SESS.fails >= 20 then INSTALL = nil; SESS.fails = 0 end    -- ~10 minutes of refusals: the key is no longer accepted, register again
     return nil
 end
 local QG = {}
@@ -3607,4 +3661,5 @@ function Fzzr:CreateWindow(opts)
     for _, t in ipairs(opts.Tags or {}) do hub:Tag(t[1] or t.Text, t[2] or t.Color) end
     return hub
 end
+Fzzr.Path = fzPath
 _G.Fzzr = Fzzr
