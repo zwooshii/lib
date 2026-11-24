@@ -3653,6 +3653,7 @@ function Fzzr.Try(fn, fallback)
     return ok
 end
 Fzzr.SRC_CORE = SRC_CORE
+Fzzr.Report = function(err, where) qerr(err, where) end   -- scripts: report a caught error (same throttling and relay as everything else)
 
 -- opts: Title, Version, Position = { x, y }, LogoUrl, IconBase, TagStyle = {...}, Tags = { { "BETA", Color3 }, ... }
 function Fzzr:CreateWindow(opts)
