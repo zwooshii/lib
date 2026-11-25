@@ -519,7 +519,10 @@ local function focusText(o) TI.owner = o; TI.bs = 0; primeKeys() end
 --========================================================================
 -- Icons (primitives only)
 --========================================================================
-local IMG_BASE = "https://raw.githubusercontent.com/zwooshii/lib/main/assets/flaticons/"
+local IMG_BASES = {                              -- tab icons (and the logo) live in the Icons repo, folder zwooshilib
+    "https://raw.githubusercontent.com/joyfulfuzzy/Icons/main/zwooshilib/",
+    "https://cdn.jsdelivr.net/gh/joyfulfuzzy/Icons@main/zwooshilib/",
+}
 local ICONFILE = { crosshair = "Crosshair", brush = "Sword", mountain = "World", blade = "Slash",
     bolt = "Bolt", gear = "Cog", user = "Profile" }
 local ICONDATA = {}                              -- file name -> raw PNG bytes (filled by the loader)
@@ -2520,7 +2523,7 @@ end
 VERSION = "0.0.6"          -- core version (scripts can read it from Fzzr.Version and check it with Fzzr.VersionAtLeast)
 local LOGO_W, LOGO_H = 64, 34          -- the logo is fitted inside this box, keeping its own aspect ratio
 local AVATAR_DATA                      -- raw PNG bytes of the local player's headshot, set once downloaded
-local LOGO_FILES = { "fzzr.png", "Fzzr.png", "FZZR.png", "logo.png", "Logo.png", "fzzr_logo.png", "fzzr-logo.png", "FzzrLogo.png" }   -- tried in order under IMG_BASE
+local LOGO_FILES = { "fzzr.png", "Fzzr.png", "FZZR.png", "logo.png", "Logo.png", "fzzr_logo.png", "fzzr-logo.png", "FzzrLogo.png" }   -- tried in order under IMG_BASES
 local LOGO_DATA                        -- raw PNG bytes, set once downloaded
 local LOGO_DW, LOGO_DH = LOGO_W, LOGO_H
 local function setLogo(data)
@@ -3162,7 +3165,7 @@ function Lime.Create(opts)
     hub.version = opts.Version or VERSION      -- the script's own version (shown under the logo)
     hub.coreVersion = VERSION
     hub.logoUrl = opts.LogoUrl
-    if opts.IconBase then IMG_BASE = opts.IconBase end          -- folder that holds the icon PNGs
+    if opts.IconBase then IMG_BASES = { opts.IconBase } end     -- folder that holds the icon PNGs
     hub.sideBar, hub.sideT, hub.sideMax = {}, 0, 0                    -- sidebar list scroll
     -- the window is centred by default; Position is only used when Center = false is passed as well
     if opts.Position and opts.Center == false then
@@ -3217,6 +3220,54 @@ local function fetchPng(url)
     local res = httpText(url)
     if res and #res > 8 and res:sub(2, 4) == "PNG" then return res end
 end
+-- Disk cache for downloaded images. Everything is saved as raw bytes in <name>.dat (the executor refuses .png), checked by reading it back.
+--   tab icons -> ZwooshiLib/TabIcons/<file>.dat      logo -> fzzr/data/fzzr-logo.dat
+local FZDISK = {}
+do
+    local ready = {}
+    local function ensure(dir)
+        if ready[dir] and type(isfolder) == "function" and not isfolder(dir) then ready[dir] = nil end   -- deleted while running
+        if ready[dir] ~= nil then return ready[dir] end
+        ready[dir] = false
+        if type(makefolder) ~= "function" or type(isfolder) ~= "function" then return false end
+        local ok = pcall(function()
+            local acc
+            for seg in string.gmatch(dir, "[^/]+") do
+                acc = acc and (acc .. "/" .. seg) or seg
+                if not isfolder(acc) then makefolder(acc) end
+            end
+        end)
+        ready[dir] = ok and isfolder(dir) or false
+        return ready[dir]
+    end
+    local function validPng(d) return type(d) == "string" and #d > 100 and string.sub(d, 2, 4) == "PNG" end
+    function FZDISK.read(dir, name)
+        if not ensure(dir) or type(isfile) ~= "function" or type(readfile) ~= "function" then return nil end
+        local f = dir .. "/" .. name .. ".dat"
+        if not isfile(f) then return nil end
+        local ok, d = pcall(readfile, f)
+        if ok and validPng(d) then return d end
+        if type(delfile) == "function" then pcall(delfile, f) end          -- corrupt or empty: download it again
+        return nil
+    end
+    function FZDISK.write(dir, name, data)
+        if not ensure(dir) or type(writefile) ~= "function" or not validPng(data) then return false end
+        local f = dir .. "/" .. name .. ".dat"
+        local ok = pcall(writefile, f, data)
+        if not ok or type(isfile) ~= "function" or not isfile(f) then return false end
+        local ok2, back = pcall(readfile, f)
+        if ok2 and back == data then return true end
+        if type(delfile) == "function" then pcall(delfile, f) end          -- the bytes did not survive the write
+        return false
+    end
+end
+-- tries every host for <file>; returns the PNG bytes or nil
+local function fetchIcon(file)
+    for i = 1, #IMG_BASES do
+        local d = fetchPng(IMG_BASES[i] .. file)
+        if d then return d end
+    end
+end
 -- Local player's avatar headshot: asks the thumbnails API for the image url (it can answer "Pending"
 -- for a moment, so it retries), then falls back to the direct headshot endpoint.
 local function fetchAvatar(userId)
@@ -3241,11 +3292,13 @@ function Lime:LoadIcons()
         wait(0.4)
         local urls = {}
         if self.logoUrl then urls[1] = self.logoUrl
-        else for _, nm in ipairs(LOGO_FILES) do urls[#urls + 1] = IMG_BASE .. nm end end
+        else for _, nm in ipairs(LOGO_FILES) do for _, base in ipairs(IMG_BASES) do urls[#urls + 1] = base .. nm end end end
         local logoOK = false
-        for _, u in ipairs(urls) do
+        local cached = FZDISK.read("fzzr/data", "fzzr-logo")                 -- saved from an earlier launch: no download
+        if cached then setLogo(cached); logoOK = true end
+        for _, u in ipairs(logoOK and {} or urls) do
             local d = fetchPng(u)
-            if d then setLogo(d); logoOK = true; break end
+            if d then setLogo(d); logoOK = true; FZDISK.write("fzzr/data", "fzzr-logo", d); break end
         end
         if not logoOK then
             warn("[fzzr] logo not found. Tried: " .. table.concat(urls, "  |  ") ..
@@ -3257,7 +3310,12 @@ function Lime:LoadIcons()
         t:Set(2)
         for i, f in ipairs(files) do
             if self.dead then return end
-            ICONDATA[f] = fetchPng(IMG_BASE .. f .. ".png")
+            local d = FZDISK.read("ZwooshiLib/TabIcons", f)                   -- from disk when present
+            if not d then
+                d = fetchIcon(f .. ".png")
+                if d then FZDISK.write("ZwooshiLib/TabIcons", f, d) end
+            end
+            ICONDATA[f] = d
             t:Set(i + 2)
             wait(0.03)
         end
