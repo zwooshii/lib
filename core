@@ -14,7 +14,7 @@
 
     Design: immediate-mode drawing on a pooled set of Drawing objects. Every drawing is created once, cached,
     and only touched when a property changes. Everything not drawn in a frame is hidden by a sweep at frame end.
-    The "Common" tab (Settings: Configs / Display / Notifications, and Players) is built in and always last.
+    The "Common" tab (Settings: Configs / Display / Notifications) is built in and always last.
 ]]
 if _G.__FzzrHub then pcall(function() _G.__FzzrHub:Destroy() end) end
 
@@ -3375,79 +3375,14 @@ end
 end   -- end of scoped block B (frame drawing / HUD / step)
 
 --========================================================================
--- Common tab: built in, always the last category. Settings (Configs / Display / Notifications) and Players.
+-- Common tab: built in, always the last category. Settings (Configs / Display / Notifications).
 --========================================================================
 function Lime:_BuildCommon()
     local hub = self
 local settings = hub:Page("Settings", { category = "Common",     icon = "gear" })
-local players  = hub:Page("Players",  { category = "Common",     icon = "user" })
 local configs  = hub:Page("Configs",  { parent = "Settings",     icon = "file" })
 local display  = hub:Page("Display",  { parent = "Settings",     icon = "monitor" })
 local notifs   = hub:Page("Notifications", { parent = "Settings", icon = "bell" })
--- Players -----------------------------------------------------------------
-hub.rel = {}                                   -- player name -> "Friend" | "Priority"
-local plNames = {}
-local pls = players:Box("Player List", "Left")
-local plSel = pls:Choice("pl_sel", "Player", { "(none)" }, 1, { width = 130, tip = "Pick a player, then mark them with the buttons below." })
-local plState = pls:Caption("No player selected")
-local function plShow()
-    local n = plNames[plSel.value]
-    plState.text = n and (n .. ": " .. (hub.rel[n] or "Neutral")) or "No player selected"
-    plState.wrapW = nil                        -- forces the caption to re-wrap its new text
-end
-local function plRefresh()
-    local names = {}
-    for _, pl in ipairs(Players:GetPlayers()) do
-        if pl ~= LocalPlayer then names[#names + 1] = pl.Name end
-    end
-    table.sort(names)
-    local keep = plNames[plSel.value]
-    plNames = names
-    for i = #plSel.items, 1, -1 do plSel.items[i] = nil end
-    if #names == 0 then
-        plSel.items[1] = "(none)"; plSel.value = 1
-    else
-        local idx = 1
-        for i, n in ipairs(names) do plSel.items[i] = n; if n == keep then idx = i end end
-        plSel.value = idx
-    end
-    plShow()
-end
-plSel.callback = function() plShow() end
-local function plMark(kind)
-    local n = plNames[plSel.value]
-    if not n then hub:Toast({ Title = "Pick a player first", Icon = "info", Duration = 2.5 }); return end
-    hub.rel[n] = kind
-    plShow()
-    hub:Toast({ Title = kind and ("Marked as " .. kind) or "Mark cleared", Text = n, Icon = "check", Duration = 2.5 })
-end
-pls:Buttons({
-    { "Friend",   function() plMark("Friend") end },
-    { "Priority", function() plMark("Priority") end },
-    { "Clear",    function() plMark(nil) end },
-    { "Refresh",  function() plRefresh() end },
-    { "Copy User ID", function()
-        local n = plNames[plSel.value]
-        local pl = n and Players:FindFirstChild(n)
-        if pl then hub:Copy(tostring(pl.UserId), "User ID copied")
-        else hub:Toast({ Title = "Pick a player first", Icon = "info", Duration = 2.5 }) end
-    end, full = true },
-})
-pcall(function()
-    Players.PlayerAdded:Connect(function() if not hub.dead then plRefresh() end end)
-    Players.PlayerRemoving:Connect(function()
-        task.spawn(function() wait(0.3); if not hub.dead then plRefresh() end end)
-    end)
-end)
-plRefresh()
-
-local pif = players:Box("Player Info", "Right")
-pif:Switch("pl_info", "Show Info Panel", false)
-pif:Multi("pl_fields", "Fields", { "Name", "Distance", "Health", "Team", "Weapon" }, { "Name", "Distance", "Health" }, { width = 122 })
-local ppr = players:Box("Priorities", "Right")
-ppr:Switch("pl_skip_friends", "Skip Friends", true, { tip = "Friends are ignored by the aimbots." })
-ppr:Switch("pl_priority_first", "Priority First", true, { tip = "Players marked Priority are targeted before everyone else." })
-
 -- Settings > Configs ----------------------------------------------------
 local function cfgToast(ok, title, text, err)
     if ok then hub:Toast({ Title = title, Text = text or "", Icon = "check", Duration = 2.5 })
