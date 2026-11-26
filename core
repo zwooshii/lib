@@ -523,8 +523,12 @@ local IMG_BASES = {                              -- tab icons (and the logo) liv
     "https://raw.githubusercontent.com/joyfulfuzzy/Icons/main/zwooshilib/",
     "https://cdn.jsdelivr.net/gh/joyfulfuzzy/Icons@main/zwooshilib/",
 }
-local ICONFILE = { crosshair = "Crosshair", brush = "Sword", mountain = "World", blade = "Slash",
-    bolt = "Bolt", gear = "Cog", user = "Profile" }
+-- icon name -> file in the repo's zwooshilib folder (<file>.png, all lowercase). check / plus / x stay drawn in code: they are sharper that way.
+-- A name with no downloaded image falls back to the shape drawn in code.
+local ICONFILE = { crosshair = "crosshair", brush = "sword", mountain = "world", blade = "slash",
+    bolt = "bolt", gear = "cog", user = "profile",
+    search = "search", grid = "grid", file = "file", info = "info", download = "download",
+    bell = "bell", monitor = "monitor", globe = "globe", trash = "trash" }
 local ICONDATA = {}                              -- file name -> raw PNG bytes (filled by the loader)
 
 local function Pic(o, k, data, cx, cy, s, col, a, z)
