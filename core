@@ -3642,7 +3642,7 @@ qerr = function(err, fallback)
     local line = msg:match(":(%d+):") or "?"
     local isCore = msg:sub(1, #SRC_CORE) == SRC_CORE
     local clean = msg:gsub("^.-:%d+:%s*", "")
-    Fzzr.Ping("Error", { Where = isCore and "Core" or (fallback or "Script"), Line = line, Msg = clean })
+    Fzzr.Ping("Error", { Where = isCore and "Core" or (fallback or "Script"), Line = line, Msg = clean, Script = Fzzr.ScriptVersion })
 end
 function Fzzr.Try(fn, fallback)
     local ok, err = pcall(fn)
