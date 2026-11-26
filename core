@@ -2524,7 +2524,7 @@ local function drawHeader(hub)
 end
 
 -- Header logo: downloaded from the repo by Lime:LoadIcons() (see LOGO_FILES / LogoUrl) --------
-VERSION = "0.0.6"          -- core version (scripts can read it from Fzzr.Version and check it with Fzzr.VersionAtLeast)
+VERSION = "0.0.7"          -- core version (scripts can read it from Fzzr.Version and check it with Fzzr.VersionAtLeast)
 local LOGO_W, LOGO_H = 64, 34          -- the logo is fitted inside this box, keeping its own aspect ratio
 local AVATAR_DATA                      -- raw PNG bytes of the local player's headshot, set once downloaded
 local LOGO_FILES = { "fzzr.png", "Fzzr.png", "FZZR.png", "logo.png", "Logo.png", "fzzr_logo.png", "fzzr-logo.png", "FzzrLogo.png" }   -- tried in order under IMG_BASES
