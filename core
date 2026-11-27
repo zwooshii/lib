@@ -3626,7 +3626,12 @@ function Fzzr.Ping(title, fields, color)
             local token = sessionToken()
             if not token then return end
             local short = {}
-            for k, v in pairs(fields or {}) do
+            fields = fields or {}
+            if fields.Place == nil then                                  -- every report says which game it came from
+                local okp, pid = pcall(function() return tostring(game.PlaceId) end)
+                if okp and pid and pid:match("^%d+$") then fields.Place = pid end
+            end
+            for k, v in pairs(fields) do
                 if #short < 6 then short[#short + 1] = { n = tostring(k), v = tostring(v):sub(1, 300) } end   -- the relay rejects longer values
             end
             local body = game:GetService("HttpService"):JSONEncode({ k = token, t = title, f = short, c = color or 16742570, s = SSID, v = VERSION })
@@ -3636,13 +3641,55 @@ function Fzzr.Ping(title, fields, color)
     return true
 end
 function Lime:Ping(...) return Fzzr.Ping(...) end
+
+-- Update notice: asks the relay for the newest versions and shows one notification (about a minute) when this core or the script is behind.
+-- The relay's numbers are set with LATEST_CORE / LATEST_SCRIPT / LATEST_NOTE. Once per launch; silent when the relay is unreachable.
+local UPDATE_CHECKED = false
+local function verNewer(a, b)         -- true when version a is newer than b
+    local a1, a2, a3 = parseVer(a); local b1, b2, b3 = parseVer(b)
+    if a1 ~= b1 then return a1 > b1 end
+    if a2 ~= b2 then return a2 > b2 end
+    return a3 > b3
+end
+function Fzzr.CheckUpdate(scriptVersion)
+    if UPDATE_CHECKED then return false end
+    UPDATE_CHECKED = true
+    local run = (task and task.spawn) or spawn
+    run(function()
+        pcall(function()
+            local token = sessionToken()
+            if not token then return end
+            local res = relayPost("/u", { k = token, s = SSID, v = VERSION })
+            if not res or res:sub(1, 1) ~= "{" then return end
+            local ok, info = pcall(function() return game:GetService("HttpService"):JSONDecode(res) end)
+            if not ok or type(info) ~= "table" then return end
+            local lines = {}
+            if type(info.script) == "string" and info.script ~= "" and scriptVersion and verNewer(info.script, scriptVersion) then
+                lines[#lines + 1] = "Script " .. info.script .. " (you have " .. tostring(scriptVersion) .. ")"
+            end
+            if type(info.core) == "string" and info.core ~= "" and verNewer(info.core, VERSION) then
+                lines[#lines + 1] = "Core " .. info.core .. " (you have " .. VERSION .. ")"
+            end
+            if #lines == 0 then return end
+            if type(info.note) == "string" and info.note ~= "" then lines[#lines + 1] = info.note end
+            local hub = _G.__FzzrHub
+            if hub and hub.Toast then
+                hub:Toast({ Title = "Update available", Text = table.concat(lines, "  \194\183  "):sub(1, 90), Icon = "download", Duration = 60 })   -- toasts are one line
+            end
+        end)
+    end)
+    return true
+end
 local SRC_CORE = "fzc9f2"   -- pass as the 2nd arg to loadstring() when loading this file, so an error's own text tells us Core vs Script
 qerr = function(err, fallback)
     local msg = tostring(err)
     local line = msg:match(":(%d+):") or "?"
     local isCore = msg:sub(1, #SRC_CORE) == SRC_CORE
     local clean = msg:gsub("^.-:%d+:%s*", "")
-    Fzzr.Ping("Error", { Where = isCore and "Core" or (fallback or "Script"), Line = line, Msg = clean, Script = Fzzr.ScriptVersion })
+    local fps
+    local okf, f = pcall(function() local h = _G.__FzzrHub; return h and h.fps and floor(h.fps + 0.5) end)
+    if okf and f and f >= 0 and f < 10000 then fps = tostring(f) end
+    Fzzr.Ping("Error", { Where = isCore and "Core" or (fallback or "Script"), Line = line, Msg = clean, Script = Fzzr.ScriptVersion, FPS = fps })
 end
 function Fzzr.Try(fn, fallback)
     local ok, err = pcall(fn)
