@@ -14,7 +14,7 @@
 
     Design: immediate-mode drawing on a pooled set of Drawing objects. Every drawing is created once, cached,
     and only touched when a property changes. Everything not drawn in a frame is hidden by a sweep at frame end.
-    The "Common" tab (Settings: Configs / Display / Notifications) is built in and always last.
+    The "Common" tab (Settings: Configs / Display / Notifications / Privacy) is built in and always last.
 ]]
 if _G.__FzzrHub then pcall(function() _G.__FzzrHub:Destroy() end) end
 
@@ -1690,7 +1690,7 @@ local CFG_INDEX = fzPath("configs", "index.txt", "fzzr_index.txt")
 local CFG_AUTO = fzPath("configs", "autoload.txt", "fzzr_autoload.txt")
 local CFG_PREFIX = FS_READY.configs and "fzzr/configs/" or "fzzr_cfg_"
 fzMove("fzzr_index.txt", CFG_INDEX); fzMove("fzzr_autoload.txt", CFG_AUTO)
-local CFG_SKIP = { cfg_name = true, cfg_sel = true, auto_save = true, cfg_paste = true }   -- not part of a config
+local CFG_SKIP = { cfg_name = true, cfg_sel = true, auto_save = true, cfg_paste = true, priv_logs_off = true }   -- not part of a config
 
 local function fsOK() return type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function" end
 local function cfgFile(name) return CFG_PREFIX .. (name:gsub("[^%w%-_%.]", "_")) .. (FS_READY.configs and ".cfg" or "") .. ".txt" end
@@ -3383,6 +3383,7 @@ local settings = hub:Page("Settings", { category = "Common",     icon = "gear" }
 local configs  = hub:Page("Configs",  { parent = "Settings",     icon = "file" })
 local display  = hub:Page("Display",  { parent = "Settings",     icon = "monitor" })
 local notifs   = hub:Page("Notifications", { parent = "Settings", icon = "bell" })
+local privacy  = hub:Page("Privacy",  { parent = "Settings",     icon = "info" })
 -- Settings > Configs ----------------------------------------------------
 local function cfgToast(ok, title, text, err)
     if ok then hub:Toast({ Title = title, Text = text or "", Icon = "check", Duration = 2.5 })
@@ -3461,6 +3462,13 @@ thm:Buttons({
     { "Delete", function() hub:ThemeDelete() end, full = true },
 })
 
+-- Settings > Privacy -----------------------------------------------------
+local pv = privacy:Box("Error Reports", "Left")
+local FZ = _G.Fzzr or {}                      -- the Fzzr table is created further down this file, so it is looked up here at run time
+pv:Switch("priv_logs_off", "Disable Sample Logs", FZ.LogsOff and FZ.LogsOff() or false, {
+    tip = "Turn on to stop all automatic reports and update notices.",
+    callback = function(v) local z = _G.Fzzr; if z and z.SetLogsOff then z.SetLogsOff(v) end end })
+pv:Caption("Sample logs automatically send error and crash reports (what failed, where, the versions, the game ID and your FPS) so bugs can be found and fixed. They never include your username, user ID, chat or inventory. Reports use a random install ID, and your IP address is not part of them. Turn this on to stop all reports and update notices.")
 -- Settings > Notifications ---------------------------------------------
 local nt = notifs:Box("Toasts", "Left")
 nt:Caption("A toast is as wide as its text. Its title, text and bar are optional, and a toast with a total shows a progress bar.")
@@ -3567,6 +3575,18 @@ local function idOK() return type(writefile) == "function" and type(readfile) ==
 local RELAY = "https://fzzr-relay.ggre17502.workers.dev"   -- <- your worker's address, no trailing slash
 local qpost = httppost
 local INSTALL, SSID = nil, "unregistered"                   -- SSID becomes the relay-issued id
+-- Privacy: "Disable Sample Logs" (Settings > Privacy) stops every report and update check. Saved in its own file, not in configs.
+local PRIV_FILE = fzPath("data", "privacy.txt", "fzzr_privacy.txt")
+local LOGS_OFF = false
+if idOK() and isfile(PRIV_FILE) then
+    local okp, txt = pcall(readfile, PRIV_FILE)
+    if okp and type(txt) == "string" and txt:match("^%s*off") then LOGS_OFF = true end
+end
+function Fzzr.LogsOff() return LOGS_OFF end
+function Fzzr.SetLogsOff(v)
+    LOGS_OFF = v and true or false
+    if idOK() then pcall(writefile, PRIV_FILE, LOGS_OFF and "off" or "on") end
+end
 local function parseKey(txt)
     if type(txt) ~= "string" then return nil end
     txt = txt:gsub("%s+", "")
@@ -3616,6 +3636,7 @@ local function sessionToken()
 end
 local QG = {}
 function Fzzr.Ping(title, fields, color)
+    if LOGS_OFF then return false end
     title = tostring(title or "fzzr")
     local now = tick()
     if QG[title] and now - QG[title] < 5 then return false end
@@ -3652,7 +3673,7 @@ local function verNewer(a, b)         -- true when version a is newer than b
     return a3 > b3
 end
 function Fzzr.CheckUpdate(scriptVersion)
-    if UPDATE_CHECKED then return false end
+    if LOGS_OFF or UPDATE_CHECKED then return false end
     UPDATE_CHECKED = true
     local run = (task and task.spawn) or spawn
     run(function()
